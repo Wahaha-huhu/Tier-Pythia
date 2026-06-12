@@ -1,0 +1,7 @@
+# Match torch to the pod CUDA. The pinned transformers range has the classic GPTNeoX
+# attention layout used by the ablation hook; model_io has a fallback if it is renamed.
+torch>=2.1
+transformers>=4.38,<4.46
+datasets>=2.14
+numpy>=1.24
+huggingface_hub>=0.20

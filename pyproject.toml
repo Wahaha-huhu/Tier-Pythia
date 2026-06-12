@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cp-pythia"
+version = "0.1.0"
+description = "Conditional and compositional reachability experiments on Pythia"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24"]
+
+[tool.setuptools.packages.find]
+include = ["cp_pythia*"]
