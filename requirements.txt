@@ -1,7 +1,7 @@
-# Match torch to the pod CUDA. The pinned transformers range has the classic GPTNeoX
-# attention layout used by the ablation hook; model_io has a fallback if it is renamed.
+# Minimal, robust dependency set. Tested intent: recent PyTorch + transformers.
+# On RunPod, start from a "PyTorch 2.x / CUDA 12" image and just pip install this.
 torch>=2.1
-transformers>=4.38,<4.46
-datasets>=2.14
+transformers>=4.40
+safetensors>=0.4
 numpy>=1.24
-huggingface_hub>=0.20
+matplotlib>=3.7

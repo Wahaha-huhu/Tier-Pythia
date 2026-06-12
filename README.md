@@ -1,178 +1,121 @@
-# cp pythia. Conditional and compositional reachability on Pythia
+# Pythia critical-period probe
 
-This repository tests, on a real pretrained Pythia model, the claim the controlled toy
-established. A decayed schedule creates a selective and recoverable barrier to acquiring
-a new composition through continued training. The composition is a two hop chain lookup
-that reuses a single hop lookup prerequisite. The test intervenes on continued training,
-since Pythia cannot have its pretraining schedule re run. The headline is the
-interventional acquirability matrix. An observational cascade across released checkpoints
-is included as supporting evidence and makes no causal claim.
+A small, self-contained transfer test of the toy-model finding — that a late/decayed
+learning-rate schedule imposes a **selective, recoverable acquirability barrier** on
+*dependent compositions* — in a real pretrained model (Pythia-160m). Designed to run on a
+single A100.
 
-## What is inside
+It is a **transfer probe, not a scaling proof**: the question is whether the toy mechanism
+is an artifact of extreme simplicity or recurs on a real model with real vocabulary.
 
-The package cp_pythia holds the chain retrieval generator mapped onto Pythia vocabulary
-ids, the masked target loss and accuracy with the next token off by one, the induction
-and key slot scores from returned attention weights, mean ablation of heads, a held out
-pretraining perplexity probe, and the continued training loop with the rate arms. The
-scripts run the sanity checks, the calibration gates, a single arm, the observational
-cascade, and the result packing. The generator and metric logic are tested offline in
-tests, run them first.
+## What it does
 
-## Setup
+**(A) Observational — date the induction window.** Load Pythia-160m at ~19 training
+checkpoints and measure when in-context copying forms (loss gap on a repeated-random-token
+sequence; plus a max-head induction-attention score). This confirms the lookup primitive is
+robustly present in the final, maximally-decayed checkpoint — the toy's premise (primitive
+present, dependent skill withheld).
 
-Install torch matched to the pod CUDA, then the rest.
+**(B) Intervention — continue-train the decayed checkpoint.** Starting from `step143000`,
+continue training on a synthetic in-context chain-retrieval task rendered in Pythia's own
+vocabulary (no new embedding rows), across a factorial:
+
+| axis | values |
+|---|---|
+| task | Hop-1 (lookup primitive) · Hop-2 (composition, must route through the intermediate) |
+| schedule (LR) | `native_low`=6e-5 (the decayed model's own floor) · `deep_low`=6e-6 (below the floor) · `rewarm`=6e-4 (back to peak) |
+| seed | 3 |
+
+Both hops are evaluated throughout every run. Metric is **excess = accuracy − chance floor**.
+For Hop-2 we also run a per-layer **logit lens** to see whether a successful arm rebuilds a
+decodable answer (and routes through the intermediate B) — the toy's reorganisation signature.
+
+> Note on optimiser state: public Pythia checkpoints carry no optimiser state, so `rewarm`
+> here is a rewarm **with reset**. The toy showed rewarm ≈ rewarm+reset, which is exactly what
+> licenses this.
+
+## Predicted pattern (the headline)
+
+- Hop-1 / `native_low` → **succeeds** (selectivity: a fresh simple lookup still learns at the decayed LR)
+- Hop-2 / `native_low` → **fails** (the barrier)
+- Hop-2 / `rewarm`     → **succeeds** (recoverability)
+
+## Setup (RunPod)
+
+Use a **PyTorch 2.x / CUDA 12** image. Then:
 
 ```bash
+cd pythia-critical-period
 pip install -r requirements.txt
-python -m pytest tests -q            # or, python tests/test_generator.py
 ```
 
-All commands below are run from the repository root, which puts cp_pythia and scripts on
-the path. No editable install is required, though pip install -e . also works.
+No HF token needed (Pythia is public). First run downloads ~5–7 GB of checkpoints into the
+HF cache; make sure the volume has ~15 GB free.
 
-## Run sequence
-
-First the harness sanity checks, which download the model and verify the wiring before any
-real compute.
+## Commands
 
 ```bash
-python -m scripts.run_sanity --model pythia-160m-deduped --device cuda
+# 0) sanity-check the environment (a few minutes, mostly downloads)
+bash scripts/run_smoke.sh
+
+# 1) full thesis run (~3–4 h on one A100)
+bash scripts/run_full.sh
+
+# 2) bundle the (small) key results to send back
+bash scripts/zip_results.sh     # -> results_bundle.zip
 ```
 
-Then the three calibration gates. Difficulty looks for a chain length where hop one is
-solved by the base but hop two sits at floor. Learnability confirms a rewarmed run can
-teach hop two. The barrier gate confirms the low rate is impaired relative to rewarm
-before the full matrix is launched.
+Sub-runs / overrides if you want them:
 
 ```bash
-python -m scripts.run_calibration --model pythia-160m-deduped --device cuda --stage difficulty
-python -m scripts.run_calibration --model pythia-160m-deduped --device cuda --stage learnability --chain-length 8
-python -m scripts.run_calibration --model pythia-160m-deduped --device cuda --stage barrier --chain-length 8
+python run.py induction                         # just the window
+python run.py intervention --seeds 3 --schedules native_low rewarm --steps 3000
+python run.py all --model EleutherAI/pythia-410m --revision step143000   # try a bigger model
 ```
 
-Then the core matrix. Each cell is one arm, one intro task, one seed. The composition is
-intro task compose. The two selectivity controls are fresh_hop1, reuse leaning, and
-reverse, formation leaning. Run the low and rewarm arms across seeds for the composition
-and both controls, then the matched budget and reset arms for the composition.
+## What to send back
 
-```bash
-# composition, low and rewarm, three seeds
-for SEED in 1 2 3; do
-  python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm low \
-    --intro-task compose --seed $SEED --chain-length 8 --post-steps 6000 \
-    --with-perplexity --out-dir runs/m160/low_compose_s$SEED
-  python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm rewarm \
-    --intro-task compose --seed $SEED --chain-length 8 --post-steps 6000 \
-    --with-perplexity --out-dir runs/m160/rewarm_compose_s$SEED
-done
+Everything in `results/` is small (JSON/CSV/PNG; no weights). `results_bundle.zip` is what to
+return. Key thesis artifacts inside it:
 
-# selectivity controls, low and rewarm, three seeds
-for SEED in 1 2 3; do
-  for TASK in fresh_hop1 reverse; do
-    python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm low \
-      --intro-task $TASK --seed $SEED --chain-length 8 --post-steps 6000 \
-      --out-dir runs/m160/low_${TASK}_s$SEED
-    python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm rewarm \
-      --intro-task $TASK --seed $SEED --chain-length 8 --post-steps 6000 \
-      --out-dir runs/m160/rewarm_${TASK}_s$SEED
-  done
-done
+- `induction_window.png` / `.csv` — when in-context copying forms (Act-3 motivation)
+- `intervention_summary.csv` — the selectivity + recoverability table (the headline numbers)
+- `intervention_curves.png` — Hop-2 barrier vs rescue, with Hop-1 as the selectivity baseline
+- `logit_lens.png` — per-layer answer/intermediate decode (mechanism transfer)
+- `SUMMARY.md` — auto-generated headline reads with the actual numbers, paste-ready
+
+## Interpreting the outcome (four canonical cases)
+
+The design pre-registers *signatures*, not a conclusion. `SUMMARY.md` auto-detects which case
+you landed in; the mapping:
+
+1. **Toy replicates** — Hop-1/native_low high, Hop-2/native_low ≈ floor, Hop-2/rewarm high →
+   schedule-induced, reopenable barrier specific to dependent compositions.
+2. **Generic plasticity loss** — even Hop-1/native_low struggles → the dissociation is *not*
+   composition-specific; the compositional framing loses support.
+3. **No barrier at the native floor** — Hop-2/native_low also succeeds → Pythia's 10% LR floor
+   sits *above* the threshold; look at `deep_low` to see where the barrier reappears.
+4. **Irreversible component** — Hop-2 stays low even under `rewarm` → an entrenchment the toy
+   lacked (would be a genuinely new finding).
+
+## Repo layout
+
+```
+config.py            all knobs (model, LRs, steps, task params)
+run.py               entry point: induction | intervention | all | smoke
+src/data.py          synthetic chain-retrieval task (fixed-length, target-only loss)
+src/model_utils.py   load Pythia checkpoints via HF (faithful GPT-NeoX params)
+src/induction.py     induction-window metrics across checkpoints
+src/train.py         continued-training loop for one arm
+src/eval.py          accuracy/floor/excess, candidate mass, logit lens
+src/plotting.py      figures
+scripts/             run_smoke.sh, run_full.sh, zip_results.sh
 ```
 
-Read the rewarm composition summaries for the final cumulative update ratio, then run the
-matched budget arm with that value so the low rate gets the same post introduction budget.
+## Notes / knobs worth knowing
 
-```bash
-# substitute the rewarm final_cum_update_ratio you read from a rewarm summary
-for SEED in 1 2 3; do
-  python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm matched_budget \
-    --intro-task compose --seed $SEED --chain-length 8 --post-steps 40000 \
-    --match-budget-to 3.0 --out-dir runs/m160/matched_compose_s$SEED
-done
-```
-
-The rewarm sweep maps the threshold by overriding the rewarm target.
-
-```bash
-for FRAC in 0.02 0.05 0.1 0.25 0.5 1.0; do
-  python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm rewarm \
-    --intro-task compose --seed 1 --chain-length 8 --post-steps 6000 \
-    --rewarm-lr $(python -c "print(6e-4*$FRAC)") --out-dir runs/m160/sweep_${FRAC}_s1
-done
-```
-
-The observational cascade, supporting evidence only.
-
-```bash
-python -m scripts.run_observational --model pythia-160m-deduped --device cuda \
-  --steps 0,1,2,4,8,16,32,64,128,256,512,1000,2000,4000,8000,16000,32000,64000,143000
-```
-
-## Send the results back
-
-The pack script collects every summary, log, and calibration and cascade json into one
-small archive with a manifest. No model weights are included.
-
-```bash
-python -m scripts.pack_results --runs-dir runs --out cp_pythia_results.zip
-```
-
-Send cp_pythia_results.zip. The summaries carry the tail accuracies, the hop two excess
-over floor, the cumulative update ratio, the transition width, and the perplexity change
-from base for every cell, which is what the thesis figures are built from.
-
-## Notes
-
-The off by one is handled, the target at the final position is read from the logits at the
-position before it. Eager attention is forced for the analysis so attention weights are
-returned. The ablation hook uses the GPTNeoX output projection, and if a newer transformers
-version renames it the model_io fallback finds it by shape. Verify the model peak and
-minimum learning rate against the Pythia configuration before trusting the default rate
-values in config. The reset arm needs a prerequisite phase to have an optimiser state to
-reset, so use it with prereq steps greater than zero, otherwise continued training already
-starts from a fresh optimiser.
-
-## Update after the first results
-
-The first matrix gave a clean selectivity dissociation but no positive composition arm.
-At the low rate the model learned a new attention pattern, reverse lookup, to 0.998 and a
-new vocabulary forward lookup to 0.999, while the two hop composition stayed at floor in
-every cell, including rewarm. The peak rewarm destroyed the prerequisite and the language
-model rather than acquiring the composition. The barrier and the recovery cannot be tested
-until a regime exists that acquires the composition at all.
-
-Four changes address this. The fresh_hop1 accuracy is now scored over the fresh pool, not
-the main pool, so it is no longer stuck at zero. A language replay fraction mixes real text
-into training to stop the language model being overwritten. A hop1 replay fraction keeps
-the prerequisite alive while a pure hop2 phase runs. And summaries now report the intro
-task own accuracy, so control runs are readable without opening the logs.
-
-The next run is a learnability search for a positive composition arm. It stages the
-prerequisite, then trains hop2 with replay, sweeping a moderate rate, since the peak is too
-destructive and the minimum is too starved.
-
-```bash
-python -m scripts.run_calibration --model pythia-160m-deduped --device cuda --stage search \
-  --chain-length 8 --content-vocab 64 \
-  --prereq-steps 2000 --prereq-lr 1e-4 \
-  --post-steps 20000 --eval-interval 100 \
-  --replay-hop1-frac 0.25 --replay-lang-frac 0.25 \
-  --search-lrs 3e-5,1e-4,2e-4,3e-4
-```
-
-If a rate gives a clear positive hop2 excess with the prerequisite retained and the
-perplexity not destroyed, that rate becomes the rewarm arm and the model minimum becomes
-the low arm, and the barrier matrix is rerun with staging and replay. The single arm run
-also exposes the replay flags.
-
-```bash
-python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm rewarm \
-  --intro-task hop2_only --seed 1 --chain-length 8 \
-  --prereq-steps 2000 --post-steps 20000 \
-  --replay-hop1-frac 0.25 --replay-lang-frac 0.25 \
-  --rewarm-lr 2e-4 --with-perplexity --out-dir runs/m160/staged_rewarm_s1
-```
-
-If no moderate rate acquires the composition even staged and with replay, ease it, a
-smaller content vocabulary or a shorter chain, found through the difficulty stage, then
-search again. A positive arm is the gate for every barrier claim.
+- `config.py` is the single source of truth; CLI flags override the common ones.
+- Model weights are **not saved** by default (keeps the bundle tiny). If you later want
+  per-arm checkpoints for deeper mechanistic work, that's a small addition to `train_arm`.
+- Sequences are fixed-length (28 tokens for chain_len=8), so batches need no padding — large
+  batch sizes are cheap; raise `batch_size` if the A100 is underused.
