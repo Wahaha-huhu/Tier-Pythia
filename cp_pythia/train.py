@@ -45,7 +45,7 @@ def _snapshot(params):
 def evaluate(model, gen, tcfg, eval_tasks, n_batches, batch_size, device, rng, perplex=None):
     out = {}
     for task in eval_tasks:
-        r = eval_task(model, gen, task, n_batches, batch_size, tcfg.content_ids, device, rng)
+        r = eval_task(model, gen, task, n_batches, batch_size, tcfg, device, rng)
         for k, v in r.items():
             out[f"{task}/{k}"] = v
     if perplex is not None:
@@ -54,7 +54,8 @@ def evaluate(model, gen, tcfg, eval_tasks, n_batches, batch_size, device, rng, p
     return out
 
 
-def train(model, tcfg, tr, arm, device, eval_tasks=None, perplex_blocks=None, log=print):
+def train(model, tcfg, tr, arm, device, eval_tasks=None, perplex_blocks=None,
+          lang_blocks=None, log=print):
     """Run one continued-training arm. Returns the path to the written summary."""
     os.makedirs(tr.out_dir, exist_ok=True)
     rng = np.random.default_rng(tr.seed)
@@ -99,14 +100,17 @@ def train(model, tcfg, tr, arm, device, eval_tasks=None, perplex_blocks=None, lo
 
     # baseline evaluation before any update
     do_eval(0, "base", 0.0)
+    rh = getattr(tr, "replay_hop1_frac", 0.0)
+    rl = getattr(tr, "replay_lang_frac", 0.0)
 
-    # phase one, optional prerequisite training on hop1
+    # phase one, optional prerequisite training on hop1 (language replay only)
     gstep = 0
     for ps in range(tr.prereq_steps):
         gstep += 1
         for g in opt.param_groups:
             g["lr"] = tr.prereq_lr
-        _train_step(model, gen, "hop1", tr.batch_size, device, rng, opt, tr.grad_clip)
+        _train_step(model, gen, "hop1", tr.batch_size, device, rng, opt, tr.grad_clip,
+                    replay_hop1_frac=0.0, replay_lang_frac=rl, lang_blocks=lang_blocks)
         if gstep % tr.eval_interval == 0:
             do_eval(gstep, "prereq", tr.prereq_lr)
 
@@ -117,13 +121,14 @@ def train(model, tcfg, tr, arm, device, eval_tasks=None, perplex_blocks=None, lo
     snap = _snapshot(params)  # cumulative budget is measured from introduction
     cum_update = 0.0
 
-    # phase two, post-introduction training under the arm rate
+    # phase two, post-introduction training under the arm rate (hop1 and language replay)
     for pstep in range(tr.post_steps):
         gstep += 1
         lr = lr_at(pstep, arm)
         for g in opt.param_groups:
             g["lr"] = lr
-        _train_step(model, gen, tr.intro_task, tr.batch_size, device, rng, opt, tr.grad_clip)
+        _train_step(model, gen, tr.intro_task, tr.batch_size, device, rng, opt, tr.grad_clip,
+                    replay_hop1_frac=rh, replay_lang_frac=rl, lang_blocks=lang_blocks)
         if gstep % tr.eval_interval == 0:
             rec = do_eval(gstep, "post", lr)
             if arm.match_budget_to is not None and rec["cum_update_ratio"] >= arm.match_budget_to:
@@ -138,16 +143,37 @@ def train(model, tcfg, tr, arm, device, eval_tasks=None, perplex_blocks=None, lo
     return spath
 
 
-def _train_step(model, gen, task, batch_size, device, rng, opt, clip):
+def _train_step(model, gen, task, batch_size, device, rng, opt, clip,
+                replay_hop1_frac=0.0, replay_lang_frac=0.0, lang_blocks=None):
+    """One optimiser step. With probability replay_lang_frac the step is a language step
+    on a real-text block to slow forgetting, with probability replay_hop1_frac it is a
+    hop1 step to keep the prerequisite alive, otherwise it is a step on the given task.
+    """
     model.train()
-    b = gen.batch(task, batch_size, rng)
-    ids = torch.as_tensor(b["input_ids"], dtype=torch.long, device=device)
-    logits = model(input_ids=ids, use_cache=False).logits
-    loss = masked_target_loss(logits, b, device)
+    u = rng.random()
     opt.zero_grad(set_to_none=True)
+    if lang_blocks is not None and replay_lang_frac > 0 and u < replay_lang_frac:
+        loss = _lang_loss(model, lang_blocks, batch_size, device, rng)
+    elif replay_hop1_frac > 0 and u < replay_lang_frac + replay_hop1_frac:
+        b = gen.batch("hop1", batch_size, rng)
+        ids = torch.as_tensor(b["input_ids"], dtype=torch.long, device=device)
+        loss = masked_target_loss(model(input_ids=ids, use_cache=False).logits, b, device)
+    else:
+        b = gen.batch(task, batch_size, rng)
+        ids = torch.as_tensor(b["input_ids"], dtype=torch.long, device=device)
+        loss = masked_target_loss(model(input_ids=ids, use_cache=False).logits, b, device)
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     opt.step()
+
+
+def _lang_loss(model, lang_blocks, batch_size, device, rng):
+    n = lang_blocks.shape[0]
+    idx = rng.integers(0, n, size=min(batch_size, n))
+    b = torch.as_tensor(lang_blocks[idx], dtype=torch.long, device=device)
+    logits = model(input_ids=b, use_cache=False).logits[:, :-1, :]
+    return torch.nn.functional.cross_entropy(
+        logits.reshape(-1, logits.size(-1)).float(), b[:, 1:].reshape(-1))
 
 
 def _tail(values, frac=0.1):
@@ -165,8 +191,13 @@ def _summarise(log_path, tcfg, tr, arm):
         "task": tcfg.to_dict(),
         "final_step": recs[-1]["step"] if recs else 0,
     }
-    for key in ["hop1/acc_content", "hop2_only/acc_content", "hop2_only/excess_content",
-                "hop2_only/floor_acc_content"]:
+    keys = ["hop1/acc_content", "hop2_only/acc_content", "hop2_only/excess_content",
+            "hop2_only/floor_acc_content"]
+    # the intro task own accuracy, so fresh_hop1 and reverse report themselves
+    it = tr.intro_task
+    if it in ("fresh_hop1", "reverse"):
+        keys += [f"{it}/acc_content", f"{it}/excess_content", f"{it}/acc_full", f"{it}/excess_full"]
+    for key in keys:
         if take and key in take[-1]:
             out["tail_" + key.replace("/", "_")] = _tail([r[key] for r in take if key in r])
     if take and "cum_update_ratio" in take[-1]:

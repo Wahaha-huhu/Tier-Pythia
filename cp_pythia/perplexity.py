@@ -11,10 +11,15 @@ import torch
 import torch.nn.functional as F
 
 
-def build_blocks(tokenizer, n_blocks=64, block_len=512, dataset="wikitext", config="wikitext-103-raw-v1"):
-    """Tokenise a fixed neutral corpus into fixed-length blocks, once, and cache the ids."""
+def build_blocks(tokenizer, n_blocks=64, block_len=512, dataset="wikitext",
+                 config="wikitext-103-raw-v1", split="validation"):
+    """Tokenise a fixed text corpus into fixed-length blocks, once, and cache the ids.
+
+    Use split validation for the forgetting probe and split train for language replay so
+    the probe is not trained on.
+    """
     from datasets import load_dataset
-    ds = load_dataset(dataset, config, split="validation")
+    ds = load_dataset(dataset, config, split=split)
     text = "\n\n".join(t for t in ds["text"] if t and not t.isspace())
     ids = tokenizer(text, return_tensors="np")["input_ids"][0]
     need = n_blocks * block_len

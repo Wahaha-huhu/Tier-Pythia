@@ -131,3 +131,48 @@ minimum learning rate against the Pythia configuration before trusting the defau
 values in config. The reset arm needs a prerequisite phase to have an optimiser state to
 reset, so use it with prereq steps greater than zero, otherwise continued training already
 starts from a fresh optimiser.
+
+## Update after the first results
+
+The first matrix gave a clean selectivity dissociation but no positive composition arm.
+At the low rate the model learned a new attention pattern, reverse lookup, to 0.998 and a
+new vocabulary forward lookup to 0.999, while the two hop composition stayed at floor in
+every cell, including rewarm. The peak rewarm destroyed the prerequisite and the language
+model rather than acquiring the composition. The barrier and the recovery cannot be tested
+until a regime exists that acquires the composition at all.
+
+Four changes address this. The fresh_hop1 accuracy is now scored over the fresh pool, not
+the main pool, so it is no longer stuck at zero. A language replay fraction mixes real text
+into training to stop the language model being overwritten. A hop1 replay fraction keeps
+the prerequisite alive while a pure hop2 phase runs. And summaries now report the intro
+task own accuracy, so control runs are readable without opening the logs.
+
+The next run is a learnability search for a positive composition arm. It stages the
+prerequisite, then trains hop2 with replay, sweeping a moderate rate, since the peak is too
+destructive and the minimum is too starved.
+
+```bash
+python -m scripts.run_calibration --model pythia-160m-deduped --device cuda --stage search \
+  --chain-length 8 --content-vocab 64 \
+  --prereq-steps 2000 --prereq-lr 1e-4 \
+  --post-steps 20000 --eval-interval 100 \
+  --replay-hop1-frac 0.25 --replay-lang-frac 0.25 \
+  --search-lrs 3e-5,1e-4,2e-4,3e-4
+```
+
+If a rate gives a clear positive hop2 excess with the prerequisite retained and the
+perplexity not destroyed, that rate becomes the rewarm arm and the model minimum becomes
+the low arm, and the barrier matrix is rerun with staging and replay. The single arm run
+also exposes the replay flags.
+
+```bash
+python -m scripts.run_arm --model pythia-160m-deduped --device cuda --arm rewarm \
+  --intro-task hop2_only --seed 1 --chain-length 8 \
+  --prereq-steps 2000 --post-steps 20000 \
+  --replay-hop1-frac 0.25 --replay-lang-frac 0.25 \
+  --rewarm-lr 2e-4 --with-perplexity --out-dir runs/m160/staged_rewarm_s1
+```
+
+If no moderate rate acquires the composition even staged and with replay, ease it, a
+smaller content vocabulary or a shorter chain, found through the difficulty stage, then
+search again. A positive arm is the gate for every barrier claim.

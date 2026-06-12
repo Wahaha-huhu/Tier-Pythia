@@ -74,7 +74,7 @@ def check_induction_and_ablation(tcfg, model, info, device):
 def check_floor(tcfg, model, device):
     gen = Generator(tcfg)
     rng = np.random.default_rng(0)
-    r = eval_task(model, gen, "hop2_only", 8, 64, tcfg.content_ids, device, rng)
+    r = eval_task(model, gen, "hop2_only", 8, 64, tcfg, device, rng)
     print("4 hop2 content acc", round(r["acc_content"], 3),
           "floor", round(r["floor_acc_content"], 3),
           "one over M is", round(1.0 / tcfg.chain_length, 3))

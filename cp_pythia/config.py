@@ -101,6 +101,10 @@ class TrainConfig:
     seed: int = 0
     dtype: str = "bfloat16"
 
+    # replay to keep the prerequisite and the language model alive during the hop2 phase
+    replay_hop1_frac: float = 0.0
+    replay_lang_frac: float = 0.0
+
     out_dir: str = "runs/run"
 
 

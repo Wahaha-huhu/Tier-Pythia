@@ -10,12 +10,16 @@ import torch.nn.functional as F
 
 
 @torch.no_grad()
-def eval_accuracy(model, batch, content_ids, device, amp_dtype=None):
-    """Return strict full-vocab accuracy, content-restricted accuracy, and target loss."""
+def eval_accuracy(model, batch, answer_ids, device, amp_dtype=None):
+    """Return strict full-vocab accuracy, answer-restricted accuracy, and target loss.
+
+    answer_ids is the vocabulary the answer must lie in for this task, the main pool for
+    most tasks and the fresh pool for fresh_hop1.
+    """
     ids = torch.as_tensor(batch["input_ids"], dtype=torch.long, device=device)
     tgt = torch.as_tensor(batch["target"], dtype=torch.long, device=device)
     pp = batch["pred_pos"]
-    ctx = torch.as_tensor(np.asarray(content_ids), dtype=torch.long, device=device)
+    ctx = torch.as_tensor(np.asarray(answer_ids), dtype=torch.long, device=device)
 
     ctx_mgr = torch.autocast(device_type=device.split(":")[0], dtype=amp_dtype) if amp_dtype else _null()
     with ctx_mgr:
@@ -29,19 +33,26 @@ def eval_accuracy(model, batch, content_ids, device, amp_dtype=None):
     return {"acc_full": acc_full, "acc_content": acc_content, "loss": loss}
 
 
+def answer_vocab(task, tcfg):
+    """The vocabulary the answer lies in for a task. fresh_hop1 answers in the fresh pool."""
+    return tcfg.fresh_ids if task == "fresh_hop1" else tcfg.content_ids
+
+
 @torch.no_grad()
-def eval_task(model, gen, task, n_batches, batch_size, content_ids, device, rng, amp_dtype=None):
+def eval_task(model, gen, task, n_batches, batch_size, tcfg, device, rng, amp_dtype=None):
     """Average accuracy over n_batches, plus the content-shuffled floor for the same task."""
+    answer_ids = answer_vocab(task, tcfg)
     real, floor = [], []
     for _ in range(n_batches):
         b = gen.batch(task, batch_size, rng, shuffle=False)
-        real.append(eval_accuracy(model, b, content_ids, device, amp_dtype))
+        real.append(eval_accuracy(model, b, answer_ids, device, amp_dtype))
         bf = gen.batch(task, batch_size, rng, shuffle=True)
-        floor.append(eval_accuracy(model, bf, content_ids, device, amp_dtype))
+        floor.append(eval_accuracy(model, bf, answer_ids, device, amp_dtype))
     out = {k: float(np.mean([r[k] for r in real])) for k in real[0]}
     fl = {f"floor_{k}": float(np.mean([r[k] for r in floor])) for k in floor[0]}
     out.update(fl)
     out["excess_content"] = out["acc_content"] - out["floor_acc_content"]
+    out["excess_full"] = out["acc_full"] - out["floor_acc_full"]
     return out
 
 

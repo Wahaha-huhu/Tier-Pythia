@@ -44,8 +44,8 @@ def main():
         diag = repeated_token_diag(tcfg, 64, block, rng)
         sc = induction_scores(model, diag, block, args.device, info["n_layers"], info["n_heads"])
         top = top_heads(sc, 1)[0]
-        h2 = eval_task(model, gen, "hop2_only", 16, 64, tcfg.content_ids, args.device, rng)
-        h1 = eval_task(model, gen, "hop1", 16, 64, tcfg.content_ids, args.device, rng)
+        h2 = eval_task(model, gen, "hop2_only", 16, 64, tcfg, args.device, rng)
+        h1 = eval_task(model, gen, "hop1", 16, 64, tcfg, args.device, rng)
         rows.append({"step": step, "induction_top": float(sc[top]), "induction_head": list(top),
                      "hop1_excess": h1["excess_content"], "hop2_excess": h2["excess_content"]})
         print(rows[-1])

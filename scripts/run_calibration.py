@@ -30,8 +30,8 @@ def stage_difficulty(args):
         for K in [2]:
             tcfg = TaskConfig(content_vocab=args.content_vocab, chain_length=M, k_max=K)
             model, _, info = load_pythia(args.model, args.revision_step, args.device, args.dtype)
-            h1 = eval_task(model, Generator(tcfg), "hop1", 16, 64, tcfg.content_ids, args.device, rng)
-            h2 = eval_task(model, Generator(tcfg), "hop2_only", 16, 64, tcfg.content_ids, args.device, rng)
+            h1 = eval_task(model, Generator(tcfg), "hop1", 16, 64, tcfg, args.device, rng)
+            h2 = eval_task(model, Generator(tcfg), "hop2_only", 16, 64, tcfg, args.device, rng)
             rows.append({"M": M, "K": K, "hop1_excess": h1["excess_content"],
                          "hop2_excess": h2["excess_content"],
                          "hop1_acc": h1["acc_content"], "hop2_acc": h2["acc_content"]})
@@ -75,9 +75,44 @@ def stage_barrier(args):
     print(out)
 
 
+def stage_search(args):
+    """Hunt for a positive composition arm. Stage hop1, then train hop2 with hop1 and
+    language replay, sweeping a moderate post rate. Reports hop2 excess for each rate.
+    """
+    from cp_pythia.config import ArmConfig
+    from cp_pythia.perplexity import build_blocks
+    tcfg = TaskConfig(content_vocab=args.content_vocab, chain_length=args.chain_length, k_max=2)
+    grid = [float(x) for x in args.search_lrs.split(",")]
+    rows = []
+    for lr in grid:
+        model, tok, _ = load_pythia(args.model, args.revision_step, args.device, args.dtype)
+        lang = build_blocks(tok, n_blocks=256, block_len=512, split="train") if args.replay_lang_frac > 0 else None
+        arm = ArmConfig(name="search", post_lr=lr, rewarm_warmup=200)
+        tr = TrainConfig(model=args.model, revision_step=args.revision_step,
+                         prereq_steps=args.prereq_steps, prereq_lr=args.prereq_lr,
+                         post_steps=args.post_steps, intro_task="hop2_only",
+                         replay_hop1_frac=args.replay_hop1_frac, replay_lang_frac=args.replay_lang_frac,
+                         eval_interval=args.eval_interval, seed=0,
+                         out_dir=f"{args.out_dir}/search_lr{lr:.0e}")
+        spath = train(model, tcfg, tr, arm, args.device, lang_blocks=lang)
+        s = json.load(open(spath))
+        rows.append({"post_lr": lr,
+                     "hop2_excess": s.get("tail_hop2_only_excess_content"),
+                     "hop1_acc": s.get("tail_hop1_acc_content"),
+                     "ppl_delta": s.get("tail_ppl_delta_from_base"),
+                     "transition": s.get("hop2_transition")})
+        print(rows[-1])
+        del model
+    json.dump(rows, open(f"{args.out_dir}/search.json", "w"), indent=2)
+    best = max(rows, key=lambda r: (r["hop2_excess"] or -1))
+    print("best rate", best["post_lr"], "hop2 excess", best["hop2_excess"])
+    print("if no rate gives a clear positive excess, stage longer or ease the composition")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", required=True, choices=["difficulty", "learnability", "barrier"])
+    ap.add_argument("--stage", required=True,
+                    choices=["difficulty", "learnability", "barrier", "search"])
     ap.add_argument("--model", default="pythia-160m-deduped")
     ap.add_argument("--revision-step", type=int, default=143000)
     ap.add_argument("--device", default="cuda")
@@ -85,12 +120,18 @@ def main():
     ap.add_argument("--content-vocab", type=int, default=64)
     ap.add_argument("--chain-length", type=int, default=8)
     ap.add_argument("--post-steps", type=int, default=4000)
+    ap.add_argument("--prereq-steps", type=int, default=0)
+    ap.add_argument("--prereq-lr", type=float, default=1.0e-4)
+    ap.add_argument("--eval-interval", type=int, default=50)
+    ap.add_argument("--replay-hop1-frac", type=float, default=0.0)
+    ap.add_argument("--replay-lang-frac", type=float, default=0.0)
+    ap.add_argument("--search-lrs", default="3e-5,1e-4,2e-4,3e-4")
     ap.add_argument("--out-dir", default="runs/calib")
     args = ap.parse_args()
     import os
     os.makedirs(args.out_dir, exist_ok=True)
     {"difficulty": stage_difficulty, "learnability": stage_learnability,
-     "barrier": stage_barrier}[args.stage](args)
+     "barrier": stage_barrier, "search": stage_search}[args.stage](args)
 
 
 if __name__ == "__main__":

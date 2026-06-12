@@ -43,6 +43,10 @@ def main():
     ap.add_argument("--rewarm-warmup", type=int, default=200)
     ap.add_argument("--match-budget-to", type=float, default=None)
     ap.add_argument("--with-perplexity", action="store_true")
+    ap.add_argument("--replay-hop1-frac", type=float, default=0.0,
+                    help="fraction of post steps that maintain hop1")
+    ap.add_argument("--replay-lang-frac", type=float, default=0.0,
+                    help="fraction of steps that replay real text to slow forgetting")
     ap.add_argument("--out-dir", default="runs/arm")
     args = ap.parse_args()
 
@@ -61,14 +65,19 @@ def main():
     tr = TrainConfig(model=args.model, revision_step=args.revision_step, prereq_steps=args.prereq_steps,
                      post_steps=args.post_steps, intro_task=args.intro_task, batch_size=args.batch_size,
                      eval_interval=args.eval_interval, eval_batches=args.eval_batches, seed=args.seed,
+                     replay_hop1_frac=args.replay_hop1_frac, replay_lang_frac=args.replay_lang_frac,
                      out_dir=args.out_dir)
 
     model, tok, info = load_pythia(args.model, args.revision_step, args.device, args.dtype, eager=False)
     perplex = None
+    lang = None
     if args.with_perplexity:
         from cp_pythia.perplexity import build_blocks
-        perplex = build_blocks(tok)
-    spath = train(model, tcfg, tr, arm, args.device, perplex_blocks=perplex)
+        perplex = build_blocks(tok, split="validation")
+    if args.replay_lang_frac > 0:
+        from cp_pythia.perplexity import build_blocks
+        lang = build_blocks(tok, n_blocks=256, block_len=512, split="train")
+    spath = train(model, tcfg, tr, arm, args.device, perplex_blocks=perplex, lang_blocks=lang)
     print("summary", spath)
     print(json.dumps(json.load(open(spath)), indent=2))
 
