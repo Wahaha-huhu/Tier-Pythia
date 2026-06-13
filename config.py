@@ -60,6 +60,7 @@ class Config:
     # ---- Sharpness / edge-of-stability probe ----
     sharpness_batch: int = 64              # fixed batch for the Hessian estimate
     sharpness_n_iter: int = 20             # power-iteration steps for top eigenvalue
+    sharpness_eps_rel: float = 3e-3        # finite-difference step, relative to ||theta||
 
     # ---- Observational induction window ----
     # All steps below exist as HF branches for Pythia (step0; powers of two to 512; then by 1000).

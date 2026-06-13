@@ -24,10 +24,9 @@ def _make_warmup_constant(optimizer, warmup):
 def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False):
     """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping
     (a schedule name like 'rewarm', or an LR label like 'lr6e-05').
-    If measure_sharpness, also track the top Hessian eigenvalue (needs eager attn)."""
+    If measure_sharpness, also track the top Hessian eigenvalue (finite-difference HVP)."""
     torch.manual_seed(seed)
-    attn = "eager" if measure_sharpness else None  # double-backward needs eager attention
-    model = load_model(cfg, dtype=torch.float32, attn_impl=attn)
+    model = load_model(cfg, dtype=torch.float32)  # sdpa, same as the sweep; FD-HVP needs no eager
     model.train()
 
     opt = torch.optim.AdamW(
@@ -69,7 +68,9 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False):
                 hop2_acc=e2["acc"], hop2_excess=e2["excess"],
             )
             if measure_sharpness:
-                lam = top_hessian_eigenvalue(model, s_input, s_labels, n_iter=cfg.sharpness_n_iter)
+                lam = top_hessian_eigenvalue(model, s_input, s_labels,
+                                             n_iter=cfg.sharpness_n_iter,
+                                             eps_rel=cfg.sharpness_eps_rel)
                 point["lambda_max"] = lam
                 point["eta_lambda"] = lr * lam
             curve.append(point)
