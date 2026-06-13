@@ -306,15 +306,16 @@ def aggregate_sweep(cfg):
     plotting.plot_sweep(points, os.path.join(cfg.out_dir, "sweep_invertedU.png"), lens_points)
     plotting.plot_curves(curves_by_group, os.path.join(cfg.out_dir, "sweep_curves.png"))
 
-    # if induction was tracked, emit an overlay (general induction vs composition) per arm
+    # if induction was tracked, emit convergent overlays (attention + behavioral) per arm
     for a in arms:
         c = a["curve"]
         if c and ("icl_gap" in c[0]):
             steps = [pt["step"] for pt in c]
             icl = [pt.get("icl_gap", float("nan")) for pt in c]
+            mh = [pt.get("max_head_induction", float("nan")) for pt in c]
             acc = [pt["hop2_acc"] for pt in c]
             fn = os.path.join(cfg.out_dir, f"track_{a['tag']}_seed{a['seed']}.png")
-            plotting.plot_track(steps, icl, acc, fn, title=f"{cfg.late_revision}, lr={a['lr']:g}")
+            plotting.plot_track(steps, icl, mh, acc, fn, title=f"{cfg.late_revision}, lr={a['lr']:g}")
 
     with open(os.path.join(cfg.out_dir, "sweep_summary.csv"), "w", newline="") as f:
         w = csv.writer(f)

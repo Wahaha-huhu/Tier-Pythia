@@ -93,24 +93,46 @@ def plot_sweep(points, out_path, lens_points=None):
     plt.close(fig)
 
 
-def plot_track(steps, icl_gap, hop2_acc, out_path, title="continued training"):
-    """Overlay: general induction (ICL gap) and composition accuracy over training."""
+def plot_track(steps, icl_gap, max_head, hop2_acc, out_path, title="continued training"):
+    """Two convergent probes of GENERAL induction across continued training.
+    Panel A (mechanistic): strongest induction-head attention vs composition accuracy
+      -- both 0-1, so a clean overlay; if the prefix-match HEAD is destroyed/repurposed
+      as the composition forms, this line falls.
+    Panel B (behavioral): ICL gap (nats) vs composition accuracy."""
     steps = np.array(steps)
-    fig, ax1 = plt.subplots(figsize=(8, 4.5))
-    c1 = "C3"
-    ax1.plot(steps, icl_gap, "-o", ms=3, color=c1, label="ICL gap (general induction)")
-    ax1.set_xlabel("continued-training step")
-    ax1.set_ylabel("ICL gap (nats)", color=c1)
-    ax1.tick_params(axis="y", labelcolor=c1)
-    ax1.grid(alpha=0.3)
-    ax2 = ax1.twinx()
-    c2 = "C0"
-    ax2.plot(steps, hop2_acc, "-s", ms=3, color=c2, label="Hop-2 accuracy (composition)")
-    ax2.axhline(0.167, color="gray", ls=":", lw=0.8)
-    ax2.set_ylabel("Hop-2 accuracy", color=c2)
-    ax2.tick_params(axis="y", labelcolor=c2)
-    ax2.set_ylim(-0.02, 1.02)
-    ax1.set_title(f"Does the primitive form before the composition? ({title})")
+    mh = np.array(max_head, dtype=float)
+    have_attn = not np.all(np.isnan(mh))
+    fig, (axA, axB) = plt.subplots(1, 2, figsize=(13, 4.5))
+
+    # --- Panel A: attention-level induction (0-1) vs composition (0-1) ---
+    if have_attn:
+        axA.plot(steps, mh, "-o", ms=3, color="C3",
+                 label="max-head induction attention")
+    axA.plot(steps, hop2_acc, "-s", ms=3, color="C0", label="Hop-2 acc (composition)")
+    axA.axhline(0.167, color="gray", ls=":", lw=0.8)
+    axA.set_ylim(-0.05, 1.05)
+    axA.set_xlabel("continued-training step")
+    axA.set_ylabel("attention score / accuracy")
+    axA.set_title("Attention-level induction vs composition"
+                  if have_attn else "Attention unavailable (SDPA refused attns)")
+    axA.grid(alpha=0.3)
+    axA.legend(fontsize=8, loc="center right")
+
+    # --- Panel B: behavioral ICL gap (nats) vs composition (twin axis) ---
+    axB.plot(steps, icl_gap, "-o", ms=3, color="C3", label="ICL gap (nats)")
+    axB.set_xlabel("continued-training step")
+    axB.set_ylabel("ICL gap (nats)", color="C3")
+    axB.tick_params(axis="y", labelcolor="C3")
+    axB.axhline(0.0, color="gray", ls=":", lw=0.8)
+    axB.grid(alpha=0.3)
+    axB2 = axB.twinx()
+    axB2.plot(steps, hop2_acc, "-s", ms=3, color="C0", label="Hop-2 acc")
+    axB2.set_ylabel("Hop-2 accuracy", color="C0")
+    axB2.tick_params(axis="y", labelcolor="C0")
+    axB2.set_ylim(-0.02, 1.02)
+    axB.set_title("Behavioral induction (ICL gap) vs composition")
+
+    fig.suptitle(f"Does the composition reuse or cannibalize induction? ({title})")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)

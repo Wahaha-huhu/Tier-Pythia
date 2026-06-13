@@ -13,7 +13,7 @@ import torch
 from .model_utils import load_model
 from .eval import evaluate
 from .sharpness import top_hessian_eigenvalue
-from .induction import icl_gap_only
+from .induction import icl_gap_only, induction_track_metrics
 
 
 def _make_warmup_constant(optimizer, warmup):
@@ -75,11 +75,14 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_in
                 point["lambda_max"] = lam
                 point["eta_lambda"] = lr * lam
             if measure_induction:
-                point["icl_gap"] = icl_gap_only(model, cfg)
+                icl, mh, t5 = induction_track_metrics(model, cfg)
+                point["icl_gap"] = icl
+                point["max_head_induction"] = mh
+                point["top5_head_induction"] = t5
             curve.append(point)
             model.train()
             extra = f"  lam {point['lambda_max']:.1f}  eta*lam {point['eta_lambda']:.2f}" if measure_sharpness else ""
-            extra += f"  icl_gap {point['icl_gap']:.2f}" if measure_induction else ""
+            extra += f"  icl {point['icl_gap']:+.2f} maxhd {point['max_head_induction']:.2f}" if measure_induction else ""
             print(
                 f"    [{tag:>12} hop{hop} s{seed}] step {step:>5}  loss {loss.item():7.3f}  "
                 f"h1_acc {e1['acc']:.3f}  h2_acc {e2['acc']:.3f}{extra}"

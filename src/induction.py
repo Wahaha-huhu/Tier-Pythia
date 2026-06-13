@@ -85,6 +85,54 @@ def induction_metrics_for_model(model, cfg):
     )
 
 
+@torch.no_grad()
+def induction_track_metrics(model, cfg):
+    """In-training probe of GENERAL induction, returning BOTH signals from one forward:
+      icl_gap   -- behavioral: second-copy minus first-copy loss advantage (nats)
+      max_head  -- mechanistic: strongest single head's attention to the induction
+                   position (q -> q-T+1) in the repeated region; 0-1
+      top5      -- mean of the five strongest such heads
+    Requests output_attentions=True, which transparently falls back to eager for THIS
+    forward only (training stays on SDPA, dynamics unchanged). If a given transformers
+    build refuses output_attentions under SDPA and raises, we retry a plain forward so
+    the behavioral signal always survives and max_head/top5 are reported as NaN.
+
+    The probe tokens are drawn from [pool_lo, pool_hi); only ~0.4% coincide with the
+    200-token chain content pool, so this measures induction on essentially-disjoint
+    tokens -- i.e. whether GENERAL prefix-match-and-copy survives, not chain lookup."""
+    T, B = cfg.induction_T, cfg.induction_batch
+    rng = np.random.default_rng(cfg.induction_seed)
+    base = rng.integers(cfg.pool_lo, cfg.pool_hi, size=(B, T))
+    seq = np.concatenate([base, base], axis=1)
+    input_ids = torch.tensor(seq, dtype=torch.long, device=cfg.device)
+    was_training = model.training
+    model.eval()
+
+    max_head, top5 = float("nan"), float("nan")
+    try:
+        out = model(input_ids=input_ids, output_attentions=True)
+        attns = getattr(out, "attentions", None)
+        if attns is not None and attns[0] is not None:
+            qs = torch.arange(T, 2 * T, device=cfg.device)
+            ks = qs - T + 1
+            hs = torch.cat([A[:, :, qs, ks].mean(dim=(0, 2)) for A in attns])  # [L*H]
+            max_head = hs.max().item()
+            top5 = hs.topk(min(5, hs.numel())).values.mean().item()
+    except Exception:  # noqa: BLE001 -- SDPA build refused output_attentions; retry plain
+        out = model(input_ids=input_ids)
+
+    logits = out.logits
+    V = logits.shape[-1]
+    lt = F.cross_entropy(
+        logits[:, :-1, :].reshape(-1, V), input_ids[:, 1:].reshape(-1), reduction="none"
+    ).reshape(B, 2 * T - 1)
+    icl_gap = lt[:, 0 : T - 1].mean().item() - lt[:, T : 2 * T - 1].mean().item()
+
+    if was_training:
+        model.train()
+    return icl_gap, max_head, top5
+
+
 def run_induction_window(cfg):
     rows = []
     for step in cfg.induction_steps:
