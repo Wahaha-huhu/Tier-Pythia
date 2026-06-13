@@ -86,7 +86,7 @@ def induction_metrics_for_model(model, cfg):
 
 
 @torch.no_grad()
-def induction_track_metrics(model, cfg):
+def induction_track_metrics(model, cfg, ablated_heads=None):
     """In-training probe of GENERAL induction, returning BOTH signals from one forward:
       icl_gap   -- behavioral: second-copy minus first-copy loss advantage (nats)
       max_head  -- mechanistic: strongest single head's attention to the induction
@@ -96,6 +96,10 @@ def induction_track_metrics(model, cfg):
     forward only (training stays on SDPA, dynamics unchanged). If a given transformers
     build refuses output_attentions under SDPA and raises, we retry a plain forward so
     the behavioral signal always survives and max_head/top5 are reported as NaN.
+
+    ablated_heads: optional iterable of (layer, head) whose attention is muted by a
+    knockout hook -- excluded from the max/top5 so we measure induction in the REMAINING
+    heads (i.e. whether the capability re-forms elsewhere), not the dead head's stripe.
 
     The probe tokens are drawn from [pool_lo, pool_hi); only ~0.4% coincide with the
     200-token chain content pool, so this measures induction on essentially-disjoint
@@ -107,6 +111,7 @@ def induction_track_metrics(model, cfg):
     input_ids = torch.tensor(seq, dtype=torch.long, device=cfg.device)
     was_training = model.training
     model.eval()
+    abl = set((int(a), int(b)) for (a, b) in ablated_heads) if ablated_heads else set()
 
     max_head, top5 = float("nan"), float("nan")
     try:
@@ -115,9 +120,16 @@ def induction_track_metrics(model, cfg):
         if attns is not None and attns[0] is not None:
             qs = torch.arange(T, 2 * T, device=cfg.device)
             ks = qs - T + 1
-            hs = torch.cat([A[:, :, qs, ks].mean(dim=(0, 2)) for A in attns])  # [L*H]
-            max_head = hs.max().item()
-            top5 = hs.topk(min(5, hs.numel())).values.mean().item()
+            scores = []
+            for L, A in enumerate(attns):
+                hs = A[:, :, qs, ks].mean(dim=(0, 2))           # [H]
+                for h in range(hs.numel()):
+                    if (L, h) not in abl:
+                        scores.append(float(hs[h].item()))
+            if scores:
+                scores = sorted(scores, reverse=True)
+                max_head = scores[0]
+                top5 = float(np.mean(scores[:min(5, len(scores))]))
     except Exception:  # noqa: BLE001 -- SDPA build refused output_attentions; retry plain
         out = model(input_ids=input_ids)
 

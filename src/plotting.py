@@ -184,3 +184,66 @@ def plot_lens(lens_by_schedule, out_path):
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
+
+
+def plot_distance(arms, out_path, jump_thresh=0.6):
+    """Weight movement vs the parameter-distance hypothesis.
+    Panel A: ||theta_t - theta_0|| over training, one line per LR, with a star at the
+      Hop-2 acquisition step -- does acquisition track a characteristic distance, and does
+      a blocked (high-LR) arm travel FAR without acquiring (distance not sufficient)?
+    Panel B: Hop-2 accuracy vs distance traversed -- if acquisition happens at a common
+      distance across LRs, the curves stack vertically at the same x."""
+    fig, (axA, axB) = plt.subplots(1, 2, figsize=(13, 4.5))
+    for a in sorted(arms, key=lambda r: r["lr"]):
+        c = a["curve"]
+        steps = np.array([p["step"] for p in c])
+        dist = np.array([p.get("weight_dist", np.nan) for p in c])
+        acc = np.array([p["hop2_acc"] for p in c])
+        lab = f"lr={a['lr']:g}"
+        line, = axA.plot(steps, dist, "-o", ms=2.5, label=lab)
+        crossed = np.where(acc >= jump_thresh)[0]
+        if crossed.size:
+            j = crossed[0]
+            axA.plot(steps[j], dist[j], "*", ms=14, color=line.get_color())
+        axB.plot(dist, acc, "-o", ms=2.5, color=line.get_color(), label=lab)
+    axA.set_xlabel("continued-training step")
+    axA.set_ylabel(r"$\|\theta_t-\theta_0\|_2$")
+    axA.set_title("Weight movement (star = Hop-2 acquisition)")
+    axA.grid(alpha=0.3)
+    axA.legend(fontsize=8)
+    axB.axhline(0.167, color="gray", ls=":", lw=0.8)
+    axB.set_xlabel(r"distance traversed $\|\theta_t-\theta_0\|_2$")
+    axB.set_ylabel("Hop-2 accuracy")
+    axB.set_ylim(-0.02, 1.02)
+    axB.set_title("Does acquisition happen at a characteristic distance?")
+    axB.grid(alpha=0.3)
+    axB.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def plot_interp(rows, out_path, title="", barrier=None):
+    """Linear-interpolation path between theta_0 (a=0) and theta_final (a=1)."""
+    a = np.array([r["alpha"] for r in rows])
+    loss = np.array([r["hop2_loss"] for r in rows])
+    acc = np.array([r["hop2_acc"] for r in rows])
+    fig, ax1 = plt.subplots(figsize=(8, 4.5))
+    ax1.plot(a, loss, "-o", ms=4, color="C3", label="Hop-2 loss")
+    ax1.set_xlabel(r"interpolation $\alpha$  ($\theta_0 \to \theta_{\rm final}$)")
+    ax1.set_ylabel("Hop-2 loss (nats)", color="C3")
+    ax1.tick_params(axis="y", labelcolor="C3")
+    ax1.grid(alpha=0.3)
+    ax2 = ax1.twinx()
+    ax2.plot(a, acc, "-s", ms=4, color="C0", label="Hop-2 acc")
+    ax2.axhline(0.167, color="gray", ls=":", lw=0.8)
+    ax2.set_ylabel("Hop-2 accuracy", color="C0")
+    ax2.tick_params(axis="y", labelcolor="C0")
+    ax2.set_ylim(-0.02, 1.02)
+    sub = ""
+    if barrier is not None:
+        sub = f"  (loss barrier {barrier['loss_barrier']:+.2f} nats, acc dip {barrier['acc_dip']:+.2f})"
+    ax1.set_title(f"Interpolation path {title}{sub}")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)

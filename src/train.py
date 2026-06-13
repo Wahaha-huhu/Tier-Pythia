@@ -22,12 +22,29 @@ def _make_warmup_constant(optimizer, warmup):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, fn)
 
 
-def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_induction=False):
+def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_induction=False,
+              ablate_topk=0, measure_distance=False, return_model=False):
     """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping.
     measure_sharpness -> track top Hessian eigenvalue (finite-difference HVP).
-    measure_induction -> track the loss-based ICL gap (general induction) over training."""
+    measure_induction -> track behavioral ICL gap + attention-based induction score.
+    ablate_topk>0     -> functionally knock out the top-k induction heads of THIS
+                         checkpoint before training (causal test; heads stay dead).
+    measure_distance  -> track L2 weight movement ||theta_t - theta_0|| each eval.
+    return_model      -> keep the trained model + theta_0 snapshot in the result
+                         (for the interpolation/mode-connectivity command)."""
     torch.manual_seed(seed)
     model = load_model(cfg, dtype=torch.float32)  # sdpa, same as the sweep; FD-HVP needs no eager
+
+    ablated = []
+    abl_handles = []
+    if ablate_topk and ablate_topk > 0:
+        from .ablation import rank_induction_heads, apply_head_ablation
+        ranked = rank_induction_heads(model, cfg)
+        ablated = [lh for (lh, _sc) in ranked[:ablate_topk]]
+        abl_handles = apply_head_ablation(model, ablated)
+        print(f"    [ablate] knocking out induction heads {ablated}  "
+              f"scores={[round(sc, 3) for (_lh, sc) in ranked[:ablate_topk]]}  "
+              f"(next strongest left intact: {round(ranked[ablate_topk][1], 3) if len(ranked) > ablate_topk else float('nan')})")
     model.train()
 
     opt = torch.optim.AdamW(
@@ -36,6 +53,11 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_in
     )
     sch = _make_warmup_constant(opt, cfg.warmup_steps)
     rng = np.random.default_rng(seed)
+
+    theta0 = theta0_norm = None
+    if measure_distance or return_model:
+        theta0 = [p.detach().clone() for p in model.parameters()]
+        theta0_norm = float(torch.sqrt(sum((p0.pow(2).sum() for p0 in theta0))).item())
 
     s_input = s_labels = None
     if measure_sharpness:
@@ -75,14 +97,20 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_in
                 point["lambda_max"] = lam
                 point["eta_lambda"] = lr * lam
             if measure_induction:
-                icl, mh, t5 = induction_track_metrics(model, cfg)
+                icl, mh, t5 = induction_track_metrics(model, cfg, ablated_heads=ablated)
                 point["icl_gap"] = icl
                 point["max_head_induction"] = mh
                 point["top5_head_induction"] = t5
+            if measure_distance:
+                d2 = sum(((p.detach() - p0).pow(2).sum() for p, p0 in zip(model.parameters(), theta0)))
+                wd = float(torch.sqrt(d2).item())
+                point["weight_dist"] = wd
+                point["weight_dist_rel"] = wd / theta0_norm if theta0_norm else float("nan")
             curve.append(point)
             model.train()
             extra = f"  lam {point['lambda_max']:.1f}  eta*lam {point['eta_lambda']:.2f}" if measure_sharpness else ""
             extra += f"  icl {point['icl_gap']:+.2f} maxhd {point['max_head_induction']:.2f}" if measure_induction else ""
+            extra += f"  ||dθ|| {point['weight_dist']:.2f}" if measure_distance else ""
             print(
                 f"    [{tag:>12} hop{hop} s{seed}] step {step:>5}  loss {loss.item():7.3f}  "
                 f"h1_acc {e1['acc']:.3f}  h2_acc {e2['acc']:.3f}{extra}"
@@ -95,7 +123,14 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_in
     result = dict(
         hop=hop, schedule=tag, tag=tag, seed=seed, lr=lr,
         curve=curve, final_hop1=f1, final_hop2=f2,
+        ablated_heads=ablated,
     )
+    if return_model:
+        result["model"] = model
+        result["theta0"] = theta0
+        return result
+    for h in abl_handles:
+        h.remove()
     del model
     torch.cuda.empty_cache()
     return result

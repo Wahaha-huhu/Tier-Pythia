@@ -3,12 +3,19 @@
 Subcommands:
   induction      observational induction-formation window across checkpoints
   intervention   the (task x schedule x seed) continued-training factorial
+  sweep          LR sweep for the composition (+ --track-induction / --track-distance)
+  sharpness      finite-difference top-Hessian-eigenvalue probe across LRs
+  ablate         CAUSAL test: knock out the induction head(s) at a fixed checkpoint and
+                 compare Hop-2 acquisition with vs without them (removes maturity confound)
+  interp         interpolate theta_0 -> theta_final (or between two solutions) and measure
+                 the Hop-2 loss/accuracy barrier (parameter-distance / mode-connectivity)
   all            induction + intervention + SUMMARY.md
   smoke          tiny end-to-end run to verify the environment (~minutes)
 
 Run from the repo root, e.g.:
-  python run.py all
-  python run.py intervention --seeds 3 --schedules native_low deep_low rewarm --steps 3000
+  python run.py ablate  --revision step1000 --ablate-topk 3 --steps 6000 --seeds 1 --out-dir results_ablate
+  python run.py interp  --revision step1000 --lr 6e-5 --steps 6000 --interp-points 21 --out-dir results_interp1000
+  python run.py sweep   --lrs 6e-6 6e-5 6e-4 --revision step1000 --steps 6000 --track-distance --out-dir results_dist
 """
 import argparse
 import csv
@@ -26,7 +33,9 @@ from config import Config
 from src.data import ChainTask
 from src.induction import run_induction_window
 from src.train import train_arm
+from src.model_utils import load_model
 from src import plotting
+from src import interp as I
 
 
 # --------------------------------------------------------------------------- io
@@ -252,13 +261,18 @@ def aggregate_sharpness(cfg):
 
 
 # ----------------------------------------------------------------------- sweep
-def cmd_sweep(cfg, lrs, track_induction=False):
+def cmd_sweep(cfg, lrs, track_induction=False, track_distance=False):
     print("\n[sweep] LR sweep for the composition (Hop-2 by default)")
     task = ChainTask(cfg)
     hops = cfg.tasks if cfg.tasks else (2,)
     n = len(lrs) * len(hops) * cfg.seeds
+    extra = []
+    if track_induction:
+        extra.append("induction tracking")
+    if track_distance:
+        extra.append("weight-distance tracking")
     print(f"  {n} arms: lrs={[f'{x:g}' for x in lrs]} hops={list(hops)} seeds={cfg.seeds}"
-          f"{' (+induction tracking)' if track_induction else ''}")
+          f"{(' (+' + ', '.join(extra) + ')') if extra else ''}")
     done = 0
     for seed in range(cfg.seeds):
         for hop in hops:
@@ -266,7 +280,9 @@ def cmd_sweep(cfg, lrs, track_induction=False):
                 done += 1
                 tag = f"lr{lr:g}"
                 print(f"\n  --- sweep arm {done}/{n}: hop{hop} lr={lr:g} seed{seed} ---")
-                res = train_arm(cfg, task, hop, lr, tag, seed, measure_induction=track_induction)
+                res = train_arm(cfg, task, hop, lr, tag, seed,
+                                measure_induction=track_induction,
+                                measure_distance=track_distance)
                 save_json(res, arm_path(cfg, hop, tag, seed))
     aggregate_sweep(cfg)
 
@@ -316,6 +332,12 @@ def aggregate_sweep(cfg):
             acc = [pt["hop2_acc"] for pt in c]
             fn = os.path.join(cfg.out_dir, f"track_{a['tag']}_seed{a['seed']}.png")
             plotting.plot_track(steps, icl, mh, acc, fn, title=f"{cfg.late_revision}, lr={a['lr']:g}")
+
+    # if weight-distance was tracked, emit the parameter-distance figure (per seed 0)
+    dist_arms = [a for a in arms if a["curve"] and ("weight_dist" in a["curve"][0])
+                 and a["seed"] == 0]
+    if dist_arms:
+        plotting.plot_distance(dist_arms, os.path.join(cfg.out_dir, "sweep_distance.png"))
 
     with open(os.path.join(cfg.out_dir, "sweep_summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
@@ -467,6 +489,119 @@ def write_summary(cfg, induction_rows, summary_rows, lens_by_schedule):
     print("\n" + "\n".join(lines))
 
 
+def _jump_step(curve, thresh=0.6, field="hop2_acc"):
+    for pt in curve:
+        if pt.get(field, 0.0) >= thresh:
+            return pt["step"]
+    return None
+
+
+# --------------------------------------------------------------- causal ablation
+def cmd_ablate(cfg, ablate_topk, lr):
+    """Hold the checkpoint fixed; compare Hop-2 acquisition WITH vs WITHOUT its induction
+    head(s). Removes the maturity confound in the checkpoint-axis result."""
+    print(f"\n[ablate] causal induction-head knockout at {cfg.late_revision}  "
+          f"(top-{ablate_topk}, lr={lr:g})")
+    task = ChainTask(cfg)
+    out = os.path.join(cfg.out_dir, "ablate")
+    os.makedirs(out, exist_ok=True)
+    rows = []
+    for seed in range(cfg.seeds):
+        for cond, k in (("control", 0), ("ablated", ablate_topk)):
+            print(f"\n  --- {cond} (ablate_topk={k}) seed{seed} ---")
+            res = train_arm(cfg, task, 2, lr, f"{cond}_lr{lr:g}", seed,
+                            measure_induction=True, ablate_topk=k)
+            save_json(res, os.path.join(out, f"{cond}_seed{seed}.json"))
+            c = res["curve"]
+            steps = [p["step"] for p in c]
+            icl = [p.get("icl_gap", float("nan")) for p in c]
+            mh = [p.get("max_head_induction", float("nan")) for p in c]
+            acc = [p["hop2_acc"] for p in c]
+            plotting.plot_track(steps, icl, mh, acc,
+                                os.path.join(out, f"track_{cond}_seed{seed}.png"),
+                                title=f"{cfg.late_revision} {cond}, lr={lr:g}")
+            rows.append(dict(cond=cond, seed=seed, ablated=res["ablated_heads"],
+                             jump=_jump_step(c), final_acc=res["final_hop2"]["acc"]))
+            print(f"    -> {cond}: Hop-2 jump @ {rows[-1]['jump']}  "
+                  f"final acc {rows[-1]['final_acc']:.3f}")
+
+    def _mean_jump(cond):
+        js = [r["jump"] for r in rows if r["cond"] == cond and r["jump"] is not None]
+        return round(float(np.mean(js)), 1) if js else None
+
+    lines = [f"# Causal induction-head ablation at {cfg.late_revision}", "",
+             f"LR={lr:g}; top-{ablate_topk} induction head(s) knocked out (frozen knockout). "
+             f"Reference: pre-induction step512 acquires Hop-2 at ~step 3400; intact "
+             f"step1000 at ~step 1200.", ""]
+    for r in rows:
+        lines.append(f"- seed{r['seed']} {r['cond']:>8}: jump @ {r['jump']}, "
+                     f"final acc {r['final_acc']:.3f}"
+                     + (f", heads={r['ablated']}" if r["ablated"] else ""))
+    lines += ["", f"mean Hop-2 jump:  control={_mean_jump('control')}  "
+              f"ablated={_mean_jump('ablated')}", "",
+              "Read: ablated >> control (toward the pre-induction ~3400) => the induction "
+              "circuit was the load-bearing head-start the composition reorganises from; "
+              "ablated ~ control => the head-start was general maturity, not the head."]
+    with open(os.path.join(out, "ABLATE_SUMMARY.md"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n" + "\n".join(lines))
+
+
+# ------------------------------------------------ interpolation / mode connectivity
+def cmd_interp(cfg, lr, interp_points, ablate_topk=0, save_weights=False, between=None):
+    """Walk the line between theta_0 and theta_final (or between two acquired solutions)
+    and measure the Hop-2 loss/accuracy barrier -- the geometric form of 'reachability'."""
+    task = ChainTask(cfg)
+    out = cfg.out_dir
+    os.makedirs(out, exist_ok=True)
+    alphas = np.linspace(0.0, 1.0, interp_points)
+
+    if between:
+        fa, fb = between
+        print(f"\n[interp] cross-checkpoint basin test: {fa}  ->  {fb}")
+        model = load_model(cfg, dtype=torch.float32)
+        model.eval()
+        ta = I.load_param_list(fa, cfg.device)
+        tb = I.load_param_list(fb, cfg.device)
+        rows = I.interpolate_eval(model, task, cfg, ta, tb, alphas, label="A->B")
+        b = I.barrier_metrics(rows)
+        save_json(dict(mode="between", files=[fa, fb], rows=rows, barrier=b),
+                  os.path.join(out, "interp_between.json"))
+        plotting.plot_interp(rows, os.path.join(out, "interp_between.png"),
+                             title="(solution A -> solution B)", barrier=b)
+        print(f"\n  loss_barrier={b['loss_barrier']:+.3f} nats   acc_dip={b['acc_dip']:+.3f}")
+        del model
+        torch.cuda.empty_cache()
+        return
+
+    print(f"\n[interp] {cfg.late_revision}: acquire Hop-2 (lr={lr:g}"
+          f"{', ablated' if ablate_topk else ''}), then interpolate theta_0 -> theta_final")
+    res = train_arm(cfg, task, 2, lr, "interp", 0,
+                    measure_induction=True, ablate_topk=ablate_topk, return_model=True)
+    model, theta0 = res["model"], res["theta0"]
+    theta1 = I.snapshot(model)
+    print(f"  acquired: final Hop-2 acc = {res['final_hop2']['acc']:.3f}")
+    if save_weights:
+        I.save_param_list(theta0, os.path.join(out, f"theta0_{cfg.late_revision}.pt"))
+        I.save_param_list(theta1, os.path.join(out, f"thetafinal_{cfg.late_revision}.pt"))
+        print(f"  saved theta0_{cfg.late_revision}.pt / thetafinal_{cfg.late_revision}.pt")
+    rows = I.interpolate_eval(model, task, cfg, theta0, theta1, alphas, label=cfg.late_revision)
+    b = I.barrier_metrics(rows)
+    save_json(dict(mode="checkpoint->final", revision=cfg.late_revision, lr=lr,
+                   ablate_topk=ablate_topk, final_acc=res["final_hop2"]["acc"],
+                   rows=rows, barrier=b),
+              os.path.join(out, "interp_curve.json"))
+    plotting.plot_interp(rows, os.path.join(out, "interp_curve.png"),
+                         title=f"({cfg.late_revision} -> acquired)", barrier=b)
+    print(f"\n  loss_barrier={b['loss_barrier']:+.3f} nats   acc_dip={b['acc_dip']:+.3f}   "
+          f"endpoint loss={b['endpoint_loss']}  acc={b['endpoint_acc']}")
+    print("  Read: ~flat/monotone (barrier ~ 0) => solution is downhill from the checkpoint, "
+          "linearly mode-connected (low effective distance); a bump => the optimiser crossed "
+          "a barrier (the harder-critical-period signature).")
+    del model
+    torch.cuda.empty_cache()
+
+
 def cmd_all(cfg):
     cmd_induction(cfg)
     cmd_intervention(cfg)  # self-aggregates and writes SUMMARY.md (using induction on disk)
@@ -517,7 +652,8 @@ def build_cfg(args):
 def main():
     p = argparse.ArgumentParser(description="Pythia critical-period probe")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("induction", "intervention", "all", "smoke", "sweep", "sharpness"):
+    for name in ("induction", "intervention", "all", "smoke", "sweep", "sharpness",
+                 "ablate", "interp"):
         sp = sub.add_parser(name)
         sp.add_argument("--model", type=str, default=None)
         sp.add_argument("--revision", type=str, default=None)
@@ -536,7 +672,26 @@ def main():
                             help="learning rates, e.g. --lrs 6e-6 2e-5 6e-5 1.5e-4 6e-4")
         if name == "sweep":
             sp.add_argument("--track-induction", dest="track_induction", action="store_true",
-                            help="also track the ICL gap (general induction) over training")
+                            help="track behavioral ICL gap + attention-based induction score")
+            sp.add_argument("--track-distance", dest="track_distance", action="store_true",
+                            help="track L2 weight movement ||theta_t - theta_0|| each eval")
+        if name in ("ablate", "interp"):
+            sp.add_argument("--lr", type=float, default=6e-5,
+                            help="continued-training LR (band centre by default)")
+        if name == "ablate":
+            sp.add_argument("--ablate-topk", dest="ablate_topk", type=int, default=3,
+                            help="number of top induction heads to knock out")
+        if name == "interp":
+            sp.add_argument("--ablate-topk", dest="ablate_topk", type=int, default=0,
+                            help="knock out top induction heads before acquiring (optional)")
+            sp.add_argument("--interp-points", dest="interp_points", type=int, default=21,
+                            help="number of alpha samples along the interpolation")
+            sp.add_argument("--save-final-weights", dest="save_final_weights",
+                            action="store_true",
+                            help="dump theta_0 / theta_final for a later --between basin test")
+            sp.add_argument("--between", nargs=2, default=None,
+                            metavar=("WEIGHTS_A", "WEIGHTS_B"),
+                            help="interpolate between two saved theta_final files instead")
     args = p.parse_args()
 
     print_env()
@@ -552,9 +707,18 @@ def main():
     elif args.cmd == "intervention":
         cmd_intervention(cfg)
     elif args.cmd == "sweep":
-        cmd_sweep(cfg, list(args.lrs), track_induction=getattr(args, "track_induction", False))
+        cmd_sweep(cfg, list(args.lrs),
+                  track_induction=getattr(args, "track_induction", False),
+                  track_distance=getattr(args, "track_distance", False))
     elif args.cmd == "sharpness":
         cmd_sharpness(cfg, list(args.lrs))
+    elif args.cmd == "ablate":
+        cmd_ablate(cfg, args.ablate_topk, args.lr)
+    elif args.cmd == "interp":
+        cmd_interp(cfg, args.lr, args.interp_points,
+                   ablate_topk=args.ablate_topk,
+                   save_weights=args.save_final_weights,
+                   between=args.between)
     else:  # all, smoke
         cmd_all(cfg)
 
