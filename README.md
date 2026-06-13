@@ -80,6 +80,12 @@ Other sub-runs:
 ```bash
 python run.py induction                                   # just the induction window
 python run.py all --model EleutherAI/pythia-410m          # bigger model
+
+# Edge-of-stability probe: track the top Hessian eigenvalue during continued training.
+# Tests whether the UPPER edge is an instability barrier (eta*lambda_max large + loss
+# can't descend) vs the band (stable descent). Uses eager attention for double-backward.
+python run.py sharpness --lrs 6e-5 6e-4 --seeds 1 --steps 5000 --out-dir results_sharpness
+#   -> results_sharpness/sharpness.png, SHARPNESS_SUMMARY.md
 ```
 
 ## What to send back

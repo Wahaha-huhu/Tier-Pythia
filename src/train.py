@@ -12,6 +12,7 @@ import torch
 
 from .model_utils import load_model
 from .eval import evaluate
+from .sharpness import top_hessian_eigenvalue
 
 
 def _make_warmup_constant(optimizer, warmup):
@@ -20,11 +21,13 @@ def _make_warmup_constant(optimizer, warmup):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, fn)
 
 
-def train_arm(cfg, task, hop, lr, tag, seed):
+def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False):
     """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping
-    (a schedule name like 'rewarm', or an LR label like 'lr6e-05')."""
+    (a schedule name like 'rewarm', or an LR label like 'lr6e-05').
+    If measure_sharpness, also track the top Hessian eigenvalue (needs eager attn)."""
     torch.manual_seed(seed)
-    model = load_model(cfg, dtype=torch.float32)  # sdpa for speed; lens uses hidden_states (impl-agnostic)
+    attn = "eager" if measure_sharpness else None  # double-backward needs eager attention
+    model = load_model(cfg, dtype=torch.float32, attn_impl=attn)
     model.train()
 
     opt = torch.optim.AdamW(
@@ -33,6 +36,13 @@ def train_arm(cfg, task, hop, lr, tag, seed):
     )
     sch = _make_warmup_constant(opt, cfg.warmup_steps)
     rng = np.random.default_rng(seed)
+
+    s_input = s_labels = None
+    if measure_sharpness:
+        srng = np.random.default_rng(cfg.eval_seed + 999)
+        sb = task.batch(cfg.sharpness_batch, hop, srng)   # fixed batch, comparable across steps/LRs
+        s_input = sb["input_ids"].to(cfg.device)
+        s_labels = sb["labels"].to(cfg.device)
 
     total_steps = cfg.steps_for(hop)
     curve = []
@@ -53,15 +63,21 @@ def train_arm(cfg, task, hop, lr, tag, seed):
         if (step % cfg.eval_every == 0) or (step == total_steps - 1):
             e1 = evaluate(model, task, cfg, cfg.train_eval_batches, hop=1)
             e2 = evaluate(model, task, cfg, cfg.train_eval_batches, hop=2)
-            curve.append(dict(
+            point = dict(
                 step=step, loss=float(loss.item()),
                 hop1_acc=e1["acc"], hop1_excess=e1["excess"],
                 hop2_acc=e2["acc"], hop2_excess=e2["excess"],
-            ))
+            )
+            if measure_sharpness:
+                lam = top_hessian_eigenvalue(model, s_input, s_labels, n_iter=cfg.sharpness_n_iter)
+                point["lambda_max"] = lam
+                point["eta_lambda"] = lr * lam
+            curve.append(point)
             model.train()
+            extra = f"  lam {point['lambda_max']:.1f}  eta*lam {point['eta_lambda']:.2f}" if measure_sharpness else ""
             print(
                 f"    [{tag:>12} hop{hop} s{seed}] step {step:>5}  loss {loss.item():7.3f}  "
-                f"h1_acc {e1['acc']:.3f}  h2_acc {e2['acc']:.3f}"
+                f"h1_acc {e1['acc']:.3f}  h2_acc {e2['acc']:.3f}{extra}"
             )
 
     # Final, larger eval. Logit lens computed on Hop-2 (the interesting mode).

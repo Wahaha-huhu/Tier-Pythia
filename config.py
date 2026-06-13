@@ -57,6 +57,10 @@ class Config:
     final_eval_batches: int = 16
     eval_seed: int = 12345                 # fixed -> identical eval set for every arm/timepoint
 
+    # ---- Sharpness / edge-of-stability probe ----
+    sharpness_batch: int = 64              # fixed batch for the Hessian estimate
+    sharpness_n_iter: int = 20             # power-iteration steps for top eigenvalue
+
     # ---- Observational induction window ----
     # All steps below exist as HF branches for Pythia (step0; powers of two to 512; then by 1000).
     induction_steps: Tuple[int, ...] = (

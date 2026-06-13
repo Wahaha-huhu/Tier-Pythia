@@ -93,6 +93,33 @@ def plot_sweep(points, out_path, lens_points=None):
     plt.close(fig)
 
 
+def plot_sharpness(curves_by_lr, out_path):
+    """curves_by_lr[lr] = dict(steps, lambda_max, eta_lambda, h2_acc)."""
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4))
+    for lr, d in sorted(curves_by_lr.items()):
+        steps = np.array(d["steps"])
+        lab = f"{lr:g}"
+        ax[0].plot(steps, d["lambda_max"], "-o", ms=3, label=lab)
+        ax[1].plot(steps, d["eta_lambda"], "-o", ms=3, label=lab)
+        ax[2].plot(steps, d["h2_acc"], "-o", ms=3, label=lab)
+    ax[0].set_yscale("log")
+    ax[0].set_title("Top Hessian eigenvalue (sharpness)")
+    ax[0].set_ylabel("lambda_max")
+    ax[1].axhline(2.0, color="k", ls="--", lw=1, label="GD edge (2/eta)")
+    ax[1].set_title("eta * lambda_max  (Adam threshold differs)")
+    ax[1].set_ylabel("eta * lambda_max")
+    ax[2].axhline(0.167, color="gray", ls=":", lw=0.8)
+    ax[2].set_title("Hop-2 accuracy (for alignment)")
+    ax[2].set_ylabel("accuracy")
+    for a in ax:
+        a.set_xlabel("continued-training step")
+        a.grid(alpha=0.3)
+        a.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 def plot_lens(lens_by_schedule, out_path):
     """lens_by_schedule[schedule] = dict(C=[per-layer], B=[per-layer])  (Hop-2)."""
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))

@@ -180,6 +180,77 @@ def aggregate_intervention(cfg):
     return summary_rows, lens_by_schedule
 
 
+# -------------------------------------------------------------------- sharpness
+def cmd_sharpness(cfg, lrs):
+    print("\n[sharpness] edge-of-stability probe (top Hessian eigenvalue) for Hop-2")
+    task = ChainTask(cfg)
+    n = len(lrs) * cfg.seeds
+    print(f"  {n} arms (eager attn): lrs={[f'{x:g}' for x in lrs]} seeds={cfg.seeds} steps={cfg.max_steps_hop2}")
+    done = 0
+    for seed in range(cfg.seeds):
+        for lr in lrs:
+            done += 1
+            tag = f"sharp_lr{lr:g}"
+            print(f"\n  --- sharpness arm {done}/{n}: lr={lr:g} seed{seed} ---")
+            res = train_arm(cfg, task, 2, lr, tag, seed, measure_sharpness=True)
+            save_json(res, arm_path(cfg, 2, tag, seed))
+    aggregate_sharpness(cfg)
+
+
+def aggregate_sharpness(cfg):
+    arms = [a for a in _load_all_arms(cfg) if str(a.get("tag", "")).startswith("sharp_lr")]
+    if not arms:
+        print("  (no sharpness arms found)")
+        return
+    by_lr = defaultdict(list)
+    for a in arms:
+        by_lr[a["lr"]].append(a)
+
+    curves_by_lr = {}
+    rows = []
+    for lr, group in sorted(by_lr.items()):
+        g = sorted(group, key=lambda x: x["seed"])[0]  # representative seed for the curve
+        c = g["curve"]
+        steps = [pt["step"] for pt in c]
+        lam = [pt.get("lambda_max", float("nan")) for pt in c]
+        el = [pt.get("eta_lambda", float("nan")) for pt in c]
+        acc = [pt["hop2_acc"] for pt in c]
+        curves_by_lr[lr] = dict(steps=steps, lambda_max=lam, eta_lambda=el, h2_acc=acc)
+        # late-phase summary (last third of training)
+        k = max(1, len(c) // 3)
+        late_el = np.mean([pt.get("eta_lambda", np.nan) for pt in c[-k:]])
+        late_lam = np.mean([pt.get("lambda_max", np.nan) for pt in c[-k:]])
+        formed = max(pt["hop2_acc"] for pt in c) - 0.167 >= 0.5
+        rows.append(dict(lr=lr, late_lambda=float(late_lam), late_eta_lambda=float(late_el),
+                         formed=formed))
+
+    plotting.plot_sharpness(curves_by_lr, os.path.join(cfg.out_dir, "sharpness.png"))
+    with open(os.path.join(cfg.out_dir, "sharpness_summary.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["lr", "late_lambda_max", "late_eta_lambda", "composition_formed"])
+        for r in rows:
+            w.writerow([f"{r['lr']:g}", f"{r['late_lambda']:.3f}", f"{r['late_eta_lambda']:.4f}",
+                        "YES" if r["formed"] else "no"])
+
+    lines = ["# Edge-of-stability probe -- Hop-2 sharpness vs continued-training LR\n",
+             f"Model `{cfg.model_name}` @ `{cfg.late_revision}`, L={cfg.chain_len}, "
+             f"Hop-2 steps={cfg.max_steps_hop2}\n",
+             "| LR | late lambda_max | late eta*lambda_max | formed? |",
+             "|---|---|---|---|"]
+    for r in sorted(rows, key=lambda x: x["lr"]):
+        lines.append(f"| {r['lr']:g} | {r['late_lambda']:.1f} | {r['late_eta_lambda']:.2f} | "
+                     f"{'YES' if r['formed'] else 'no'} |")
+    lines.append("\nReading: if the blocked high-LR arm sits at a much larger eta*lambda_max than "
+                 "the forming arms (and cannot reduce its loss), the upper edge is an instability "
+                 "barrier -- the LR is too large for the local curvature to descend into the routing "
+                 "minimum. (eta*lambda~2 is the GD edge; AdamW's threshold differs, so compare across "
+                 "LRs rather than to 2 exactly.)")
+    with open(os.path.join(cfg.out_dir, "SHARPNESS_SUMMARY.md"), "w") as f:
+        f.write("\n".join(lines))
+    print(f"  -> {cfg.out_dir}/sharpness.png, sharpness_summary.csv, SHARPNESS_SUMMARY.md")
+    print("\n" + "\n".join(lines))
+
+
 # ----------------------------------------------------------------------- sweep
 def cmd_sweep(cfg, lrs):
     print("\n[sweep] LR sweep for the composition (Hop-2 by default)")
@@ -434,7 +505,7 @@ def build_cfg(args):
 def main():
     p = argparse.ArgumentParser(description="Pythia critical-period probe")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("induction", "intervention", "all", "smoke", "sweep"):
+    for name in ("induction", "intervention", "all", "smoke", "sweep", "sharpness"):
         sp = sub.add_parser(name)
         sp.add_argument("--model", type=str, default=None)
         sp.add_argument("--revision", type=str, default=None)
@@ -448,9 +519,9 @@ def main():
                         choices=["native_low", "deep_low", "rewarm"])
         sp.add_argument("--tasks", nargs="+", type=int, default=None, choices=[1, 2])
         sp.add_argument("--out-dir", dest="out_dir", type=str, default=None)
-        if name == "sweep":
+        if name in ("sweep", "sharpness"):
             sp.add_argument("--lrs", nargs="+", type=float, required=True,
-                            help="learning rates to sweep, e.g. --lrs 6e-6 2e-5 6e-5 1.5e-4 6e-4")
+                            help="learning rates, e.g. --lrs 6e-6 2e-5 6e-5 1.5e-4 6e-4")
     args = p.parse_args()
 
     print_env()
@@ -467,6 +538,8 @@ def main():
         cmd_intervention(cfg)
     elif args.cmd == "sweep":
         cmd_sweep(cfg, list(args.lrs))
+    elif args.cmd == "sharpness":
+        cmd_sharpness(cfg, list(args.lrs))
     else:  # all, smoke
         cmd_all(cfg)
 
