@@ -29,6 +29,9 @@ class Config:
     #                                        Reduced from 8: shorter in-context search lets the
     #                                        Hop-2 composition form in far fewer steps (the
     #                                        phenomenon is not L-specific). Floor = 1/(L+1).
+    n_distractors: int = 0                  # extra off-chain [key,val] edges mixed into context
+    #                                        (0 = original task; >0 raises difficulty / capacity
+    #                                        pressure; also an axis of the generalization battery)
     pool_seed: int = 0                     # fixes the content pool identically across all runs
 
     # ---- Learning-rate schedules (the core manipulation) ----

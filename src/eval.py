@@ -16,6 +16,31 @@ import torch
 
 
 @torch.no_grad()
+def evaluate_variant(model, task, cfg, hop, n_batches, pool=None, L=None,
+                     n_distractors=None, seed_offset=0):
+    """Accuracy on an OOD variant of the task (held-out tokens / longer chains / distractors).
+    Primary metric is full-vocab argmax accuracy == answer; floor = 1/(L+1) for reference."""
+    model.eval()
+    rng = np.random.default_rng(cfg.eval_seed + hop + seed_offset)
+    tot = correct = 0
+    floor_sum = mass_sum = 0.0
+    for _ in range(n_batches):
+        b = task.batch(cfg.eval_batch_size, hop, rng, pool=pool, L=L, n_distractors=n_distractors)
+        ids = b["input_ids"].to(cfg.device)
+        C = b["C_ids"].to(cfg.device)
+        cand = b["cand_ids"].to(cfg.device)
+        logits = model(input_ids=ids[:, :-1]).logits[:, -1, :]
+        pred = logits.argmax(-1)
+        correct += (pred == C).sum().item()
+        tot += C.numel()
+        floor_sum += (1.0 / cand.shape[1]) * C.numel()
+        mass_sum += logits.softmax(-1).gather(1, cand).sum(1).sum().item()
+    acc = correct / tot
+    floor = floor_sum / tot
+    return dict(acc=acc, floor=floor, excess=acc - floor, cand_mass=mass_sum / tot, n=tot)
+
+
+@torch.no_grad()
 def evaluate(model, task, cfg, n_batches, hop, do_lens=False):
     model.eval()
     rng = np.random.default_rng(cfg.eval_seed + hop)  # identical eval set every call

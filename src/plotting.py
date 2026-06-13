@@ -247,3 +247,32 @@ def plot_interp(rows, out_path, title="", barrier=None):
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
+
+
+def plot_generalize(rows, out_path, title="", in_dist_acc=None):
+    """Horizontal bars of accuracy per OOD variant, with the per-variant chance floor marked.
+    Near 1.0 => the systematic algorithm transfers; near the floor => a distribution-specific
+    heuristic that doesn't generalize on that axis."""
+    rows = list(rows)
+    names = [r["name"] for r in rows]
+    acc = np.array([r["acc"] for r in rows])
+    floor = np.array([r["floor"] for r in rows])
+    y = np.arange(len(rows))[::-1]            # first row at top
+    colors = ["#3b7dd8" if r.get("hop", 2) == 2 else "#7a7a7a" for r in rows]
+    fig, ax = plt.subplots(figsize=(9, max(3.0, 0.5 * len(rows) + 1.2)))
+    ax.barh(y, acc, color=colors, height=0.6, zorder=2)
+    ax.scatter(floor, y, marker="|", s=400, color="crimson", zorder=3, label="chance floor")
+    for yi, a in zip(y, acc):
+        ax.text(min(a + 0.02, 0.98), yi, f"{a:.2f}", va="center", fontsize=8)
+    if in_dist_acc is not None:
+        ax.axvline(in_dist_acc, color="green", ls="--", lw=1, label=f"in-dist acc {in_dist_acc:.2f}")
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=8)
+    ax.set_xlim(0, 1.05)
+    ax.set_xlabel("accuracy (full-vocab argmax == answer)")
+    ax.set_title(title)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(alpha=0.3, axis="x")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)

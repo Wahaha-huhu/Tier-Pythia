@@ -606,6 +606,69 @@ def cmd_interp(cfg, lr, interp_points, ablate_topk=0, save_weights=False, betwee
     torch.cuda.empty_cache()
 
 
+# ----------------------------------------------- systematic generalization battery
+def cmd_generalize(cfg, lr, eval_batches=None):
+    """Acquire Hop-2, then test whether it learned the systematic algorithm vs a
+    distribution-specific heuristic: held-out tokens, longer chains, distractor bindings.
+    Each variant shifts ONE axis relative to the training condition. The distractor/length
+    knobs also serve as a capacity-stress dial when --train-distractors / --chain-len are set."""
+    from src.eval import evaluate_variant
+    task = ChainTask(cfg)
+    out = cfg.out_dir
+    os.makedirs(out, exist_ok=True)
+    nb = eval_batches or cfg.final_eval_batches
+    Ltr, ndtr = cfg.chain_len, task.n_distractors
+
+    print(f"\n[generalize] acquiring Hop-2 at {cfg.late_revision} "
+          f"(lr={lr:g}, train L={Ltr}, train distractors={ndtr})")
+    res = train_arm(cfg, task, 2, lr, "gen", 0, return_model=True)
+    model = res["model"]
+    in_acc = res["final_hop2"]["acc"]
+    print(f"  acquired: in-distribution Hop-2 acc = {in_acc:.3f}\n  --- OOD battery ---")
+
+    # each entry: (name, hop, pool, L, n_distractors) -- one axis shifted vs the training baseline
+    H = task.held_out_pool
+    spec = [
+        ("baseline (= train cond)",      2, None, Ltr,     ndtr),
+        ("held-out tokens",              2, H,    Ltr,     ndtr),
+        (f"longer chain L={Ltr+1}",      2, None, Ltr + 1, ndtr),
+        (f"longer chain L={Ltr+2}",      2, None, Ltr + 2, ndtr),
+        (f"longer chain L={Ltr+3}",      2, None, Ltr + 3, ndtr),
+        (f"distractors +{ndtr+3}",       2, None, Ltr,     ndtr + 3),
+        (f"distractors +{ndtr+6}",       2, None, Ltr,     ndtr + 6),
+        (f"distractors +{ndtr+12}",      2, None, Ltr,     ndtr + 12),
+        ("held-out + 6 distractors",     2, H,    Ltr,     ndtr + 6),
+        ("[Hop1] held-out tokens",       1, H,    Ltr,     ndtr),
+        (f"[Hop1] longer L={Ltr+3}",     1, None, Ltr + 3, ndtr),
+    ]
+    rows = []
+    for name, hop, pool, L, nd in spec:
+        r = evaluate_variant(model, task, cfg, hop, nb, pool=pool, L=L, n_distractors=nd)
+        rows.append(dict(name=name, hop=hop, pool=("held-out" if pool is not None else "train"),
+                         L=L, n_distractors=nd, acc=r["acc"], floor=r["floor"],
+                         excess=r["excess"], cand_mass=r["cand_mass"]))
+        print(f"  {name:>26}: acc {r['acc']:.3f}  floor {r['floor']:.3f}  excess {r['excess']:+.3f}")
+
+    save_json(dict(revision=cfg.late_revision, lr=lr, train_L=Ltr, train_distractors=ndtr,
+                   in_dist_acc=in_acc, rows=rows), os.path.join(out, "generalize.json"))
+    plotting.plot_generalize(rows, os.path.join(out, "generalize.png"),
+                             title=f"{cfg.late_revision} systematic generalization "
+                                   f"(train L={Ltr}, dist={ndtr})", in_dist_acc=in_acc)
+
+    lines = [f"# Systematic generalization at {cfg.late_revision}", "",
+             f"Trained Hop-2 at lr={lr:g}, L={Ltr}, distractors={ndtr}; in-distribution "
+             f"acc {in_acc:.3f}. Each row shifts one axis vs that baseline. Near in-dist acc "
+             f"=> the algorithm transfers; near floor => a distribution-specific heuristic.", "",
+             "| variant | hop | acc | floor | excess |", "|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r['name']} | {r['hop']} | {r['acc']:.3f} | {r['floor']:.3f} | {r['excess']:+.3f} |")
+    with open(os.path.join(out, "GENERALIZE_SUMMARY.md"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n  -> " + os.path.join(out, "GENERALIZE_SUMMARY.md"))
+    del model
+    torch.cuda.empty_cache()
+
+
 def cmd_all(cfg):
     cmd_induction(cfg)
     cmd_intervention(cfg)  # self-aggregates and writes SUMMARY.md (using induction on disk)
@@ -648,6 +711,8 @@ def build_cfg(args):
         cfg.schedules = tuple(args.schedules)
     if getattr(args, "tasks", None):
         cfg.tasks = tuple(args.tasks)
+    if getattr(args, "train_distractors", None) is not None:
+        cfg.n_distractors = args.train_distractors
     if getattr(args, "out_dir", None):
         cfg.out_dir = args.out_dir
     return cfg
@@ -657,7 +722,7 @@ def main():
     p = argparse.ArgumentParser(description="Pythia critical-period probe")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in ("induction", "intervention", "all", "smoke", "sweep", "sharpness",
-                 "ablate", "interp"):
+                 "ablate", "interp", "generalize"):
         sp = sub.add_parser(name)
         sp.add_argument("--model", type=str, default=None)
         sp.add_argument("--revision", type=str, default=None)
@@ -682,6 +747,13 @@ def main():
         if name in ("ablate", "interp"):
             sp.add_argument("--lr", type=float, default=6e-5,
                             help="continued-training LR (band centre by default)")
+        if name == "generalize":
+            sp.add_argument("--lr", type=float, default=6e-5,
+                            help="LR used to acquire Hop-2 before testing generalization")
+            sp.add_argument("--train-distractors", dest="train_distractors", type=int, default=None,
+                            help="distractor edges during TRAINING (capacity-stress dial)")
+            sp.add_argument("--eval-batches", dest="eval_batches", type=int, default=None,
+                            help="eval batches per variant (default config.final_eval_batches)")
         if name == "ablate":
             sp.add_argument("--ablate-topk", dest="ablate_topk", type=int, default=3,
                             help="number of top induction heads to knock out")
@@ -729,6 +801,8 @@ def main():
                    ablate_topk=args.ablate_topk,
                    save_weights=args.save_final_weights,
                    between=args.between)
+    elif args.cmd == "generalize":
+        cmd_generalize(cfg, args.lr, eval_batches=args.eval_batches)
     else:  # all, smoke
         cmd_all(cfg)
 
