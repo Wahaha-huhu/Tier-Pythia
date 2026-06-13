@@ -552,9 +552,11 @@ def cmd_ablate(cfg, ablate_topk, lr, ablate_mode="induction", no_control=False):
 
 
 # ------------------------------------------------ interpolation / mode connectivity
-def cmd_interp(cfg, lr, interp_points, ablate_topk=0, save_weights=False, between=None):
+def cmd_interp(cfg, lr, interp_points, ablate_topk=0, save_weights=False, between=None, seed=0):
     """Walk the line between theta_0 and theta_final (or between two acquired solutions)
-    and measure the Hop-2 loss/accuracy barrier -- the geometric form of 'reachability'."""
+    and report the Hop-2 loss/accuracy barrier. The within-checkpoint control (two seeds of
+    the same checkpoint) calibrates whether a cross-checkpoint barrier reflects the checkpoint
+    or just generic SGD run-to-run basin diversity."""
     task = ChainTask(cfg)
     out = cfg.out_dir
     os.makedirs(out, exist_ok=True)
@@ -578,17 +580,18 @@ def cmd_interp(cfg, lr, interp_points, ablate_topk=0, save_weights=False, betwee
         torch.cuda.empty_cache()
         return
 
-    print(f"\n[interp] {cfg.late_revision}: acquire Hop-2 (lr={lr:g}"
+    print(f"\n[interp] {cfg.late_revision} seed{seed}: acquire Hop-2 (lr={lr:g}"
           f"{', ablated' if ablate_topk else ''}), then interpolate theta_0 -> theta_final")
-    res = train_arm(cfg, task, 2, lr, "interp", 0,
+    res = train_arm(cfg, task, 2, lr, "interp", seed,
                     measure_induction=True, ablate_topk=ablate_topk, return_model=True)
     model, theta0 = res["model"], res["theta0"]
     theta1 = I.snapshot(model)
     print(f"  acquired: final Hop-2 acc = {res['final_hop2']['acc']:.3f}")
     if save_weights:
-        I.save_param_list(theta0, os.path.join(out, f"theta0_{cfg.late_revision}.pt"))
-        I.save_param_list(theta1, os.path.join(out, f"thetafinal_{cfg.late_revision}.pt"))
-        print(f"  saved theta0_{cfg.late_revision}.pt / thetafinal_{cfg.late_revision}.pt")
+        tag = f"{cfg.late_revision}_seed{seed}"
+        I.save_param_list(theta0, os.path.join(out, f"theta0_{tag}.pt"))
+        I.save_param_list(theta1, os.path.join(out, f"thetafinal_{tag}.pt"))
+        print(f"  saved theta0_{tag}.pt / thetafinal_{tag}.pt")
     rows = I.interpolate_eval(model, task, cfg, theta0, theta1, alphas, label=cfg.late_revision)
     b = I.barrier_metrics(rows)
     save_json(dict(mode="checkpoint->final", revision=cfg.late_revision, lr=lr,
@@ -791,6 +794,8 @@ def main():
                             help="knock out top induction heads before acquiring (optional)")
             sp.add_argument("--interp-points", dest="interp_points", type=int, default=21,
                             help="number of alpha samples along the interpolation")
+            sp.add_argument("--seed", type=int, default=0,
+                            help="training seed (use different seeds for the within-checkpoint control)")
             sp.add_argument("--save-final-weights", dest="save_final_weights",
                             action="store_true",
                             help="dump theta_0 / theta_final for a later --between basin test")
@@ -824,7 +829,7 @@ def main():
         cmd_interp(cfg, args.lr, args.interp_points,
                    ablate_topk=args.ablate_topk,
                    save_weights=args.save_final_weights,
-                   between=args.between)
+                   between=args.between, seed=args.seed)
     elif args.cmd == "generalize":
         cmd_generalize(cfg, args.lr, eval_batches=args.eval_batches)
     else:  # all, smoke
