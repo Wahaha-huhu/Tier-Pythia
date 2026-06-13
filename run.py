@@ -497,20 +497,24 @@ def _jump_step(curve, thresh=0.6, field="hop2_acc"):
 
 
 # --------------------------------------------------------------- causal ablation
-def cmd_ablate(cfg, ablate_topk, lr):
+def cmd_ablate(cfg, ablate_topk, lr, ablate_mode="induction", no_control=False):
     """Hold the checkpoint fixed; compare Hop-2 acquisition WITH vs WITHOUT its induction
-    head(s). Removes the maturity confound in the checkpoint-axis result."""
-    print(f"\n[ablate] causal induction-head knockout at {cfg.late_revision}  "
-          f"(top-{ablate_topk}, lr={lr:g})")
+    head(s). Removes the maturity confound in the checkpoint-axis result. ablate_mode=
+    'random' runs a matched random-head control to separate circuit identity from count."""
+    print(f"\n[ablate] causal head knockout at {cfg.late_revision}  "
+          f"(top-{ablate_topk}, mode={ablate_mode}, lr={lr:g})")
     task = ChainTask(cfg)
     out = os.path.join(cfg.out_dir, "ablate")
     os.makedirs(out, exist_ok=True)
+    abl_label = "ablated" if ablate_mode == "induction" else f"ablated_{ablate_mode}"
+    conds = [] if no_control else [("control", 0, "induction")]
+    conds.append((abl_label, ablate_topk, ablate_mode))
     rows = []
     for seed in range(cfg.seeds):
-        for cond, k in (("control", 0), ("ablated", ablate_topk)):
-            print(f"\n  --- {cond} (ablate_topk={k}) seed{seed} ---")
+        for cond, k, mode in conds:
+            print(f"\n  --- {cond} (ablate_topk={k}, mode={mode}) seed{seed} ---")
             res = train_arm(cfg, task, 2, lr, f"{cond}_lr{lr:g}", seed,
-                            measure_induction=True, ablate_topk=k)
+                            measure_induction=True, ablate_topk=k, ablate_mode=mode)
             save_json(res, os.path.join(out, f"{cond}_seed{seed}.json"))
             c = res["curve"]
             steps = [p["step"] for p in c]
@@ -529,19 +533,19 @@ def cmd_ablate(cfg, ablate_topk, lr):
         js = [r["jump"] for r in rows if r["cond"] == cond and r["jump"] is not None]
         return round(float(np.mean(js)), 1) if js else None
 
-    lines = [f"# Causal induction-head ablation at {cfg.late_revision}", "",
-             f"LR={lr:g}; top-{ablate_topk} induction head(s) knocked out (frozen knockout). "
+    lines = [f"# Causal head ablation at {cfg.late_revision}", "",
+             f"LR={lr:g}; top-{ablate_topk}, mode={ablate_mode} (frozen knockout). "
              f"Reference: pre-induction step512 acquires Hop-2 at ~step 3400; intact "
-             f"step1000 at ~step 1200.", ""]
+             f"step1000 at ~step 1200; full induction knockout (top-8) at ~step 2400.", ""]
     for r in rows:
-        lines.append(f"- seed{r['seed']} {r['cond']:>8}: jump @ {r['jump']}, "
+        lines.append(f"- seed{r['seed']} {r['cond']:>14}: jump @ {r['jump']}, "
                      f"final acc {r['final_acc']:.3f}"
                      + (f", heads={r['ablated']}" if r["ablated"] else ""))
-    lines += ["", f"mean Hop-2 jump:  control={_mean_jump('control')}  "
-              f"ablated={_mean_jump('ablated')}", "",
-              "Read: ablated >> control (toward the pre-induction ~3400) => the induction "
-              "circuit was the load-bearing head-start the composition reorganises from; "
-              "ablated ~ control => the head-start was general maturity, not the head."]
+    lines += ["", f"mean Hop-2 jump:  " + "  ".join(
+        f"{c}={_mean_jump(c)}" for c in dict.fromkeys(r["cond"] for r in rows)), "",
+        "Read (random-control): random ~ control => spare heads, so the induction-ablation "
+        "slowdown is induction-SPECIFIC (real scaffold). random ~ induction-ablated => the "
+        "slowdown is mid-layer capacity, not induction (over-parameterisation bites)."]
     with open(os.path.join(out, "ABLATE_SUMMARY.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n" + "\n".join(lines))
@@ -681,6 +685,11 @@ def main():
         if name == "ablate":
             sp.add_argument("--ablate-topk", dest="ablate_topk", type=int, default=3,
                             help="number of top induction heads to knock out")
+            sp.add_argument("--ablate-mode", dest="ablate_mode", default="induction",
+                            choices=["induction", "random"],
+                            help="'induction' cuts top-k induction heads; 'random' a matched control")
+            sp.add_argument("--no-control", dest="no_control", action="store_true",
+                            help="skip the unablated control arm (reuse a prior one)")
         if name == "interp":
             sp.add_argument("--ablate-topk", dest="ablate_topk", type=int, default=0,
                             help="knock out top induction heads before acquiring (optional)")
@@ -713,7 +722,8 @@ def main():
     elif args.cmd == "sharpness":
         cmd_sharpness(cfg, list(args.lrs))
     elif args.cmd == "ablate":
-        cmd_ablate(cfg, args.ablate_topk, args.lr)
+        cmd_ablate(cfg, args.ablate_topk, args.lr,
+                   ablate_mode=args.ablate_mode, no_control=args.no_control)
     elif args.cmd == "interp":
         cmd_interp(cfg, args.lr, args.interp_points,
                    ablate_topk=args.ablate_topk,

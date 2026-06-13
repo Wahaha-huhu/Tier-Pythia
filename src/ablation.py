@@ -68,6 +68,25 @@ def rank_induction_heads(model, cfg):
     return ranked
 
 
+def select_ablation_heads(model, cfg, topk, mode="induction", seed=0):
+    """Return (heads_to_ablate, ranked). mode='induction' -> the top-k induction heads.
+    mode='random' -> a MATCHED control: for each induction head in a layer, pick a random
+    OTHER head in that same layer (same count, same per-layer profile, disjoint from the
+    induction set), so the comparison isolates circuit identity from head count/depth."""
+    ranked = rank_induction_heads(model, cfg)
+    induction_heads = [lh for (lh, _sc) in ranked[:topk]]
+    if mode == "induction":
+        return induction_heads, ranked
+    rng = np.random.default_rng(seed)
+    nheads = model.config.num_attention_heads
+    ind_set = set(induction_heads)
+    chosen = []
+    for (L, _h) in induction_heads:                      # one random head per induction slot, same layer
+        opts = [(L, hh) for hh in range(nheads) if (L, hh) not in ind_set and (L, hh) not in chosen]
+        chosen.append(opts[int(rng.integers(len(opts)))])
+    return chosen, ranked
+
+
 def apply_head_ablation(model, head_list):
     """Functionally knock out the given (layer, head) pairs for the model's lifetime.
     Returns hook handles (keep them alive for the whole run)."""

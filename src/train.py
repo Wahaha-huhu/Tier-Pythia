@@ -23,12 +23,13 @@ def _make_warmup_constant(optimizer, warmup):
 
 
 def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_induction=False,
-              ablate_topk=0, measure_distance=False, return_model=False):
+              ablate_topk=0, ablate_mode="induction", measure_distance=False, return_model=False):
     """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping.
     measure_sharpness -> track top Hessian eigenvalue (finite-difference HVP).
     measure_induction -> track behavioral ICL gap + attention-based induction score.
-    ablate_topk>0     -> functionally knock out the top-k induction heads of THIS
-                         checkpoint before training (causal test; heads stay dead).
+    ablate_topk>0     -> functionally knock out k heads of THIS checkpoint before training
+                         (causal test; heads stay dead). ablate_mode='induction' cuts the
+                         top-k induction heads; 'random' cuts a matched random control set.
     measure_distance  -> track L2 weight movement ||theta_t - theta_0|| each eval.
     return_model      -> keep the trained model + theta_0 snapshot in the result
                          (for the interpolation/mode-connectivity command)."""
@@ -38,13 +39,12 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_in
     ablated = []
     abl_handles = []
     if ablate_topk and ablate_topk > 0:
-        from .ablation import rank_induction_heads, apply_head_ablation
-        ranked = rank_induction_heads(model, cfg)
-        ablated = [lh for (lh, _sc) in ranked[:ablate_topk]]
+        from .ablation import select_ablation_heads, apply_head_ablation
+        ablated, ranked = select_ablation_heads(model, cfg, ablate_topk, mode=ablate_mode, seed=seed)
         abl_handles = apply_head_ablation(model, ablated)
-        print(f"    [ablate] knocking out induction heads {ablated}  "
-              f"scores={[round(sc, 3) for (_lh, sc) in ranked[:ablate_topk]]}  "
-              f"(next strongest left intact: {round(ranked[ablate_topk][1], 3) if len(ranked) > ablate_topk else float('nan')})")
+        ind_top = [lh for (lh, _sc) in ranked[:ablate_topk]]
+        print(f"    [ablate:{ablate_mode}] knocking out {ablated}  "
+              f"(induction top-{ablate_topk}={ind_top})")
     model.train()
 
     opt = torch.optim.AdamW(
