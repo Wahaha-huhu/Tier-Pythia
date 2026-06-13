@@ -20,12 +20,13 @@ def _make_warmup_constant(optimizer, warmup):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, fn)
 
 
-def train_arm(cfg, task, hop, schedule, seed):
+def train_arm(cfg, task, hop, lr, tag, seed):
+    """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping
+    (a schedule name like 'rewarm', or an LR label like 'lr6e-05')."""
     torch.manual_seed(seed)
     model = load_model(cfg, dtype=torch.float32)  # sdpa for speed; lens uses hidden_states (impl-agnostic)
     model.train()
 
-    lr = cfg.lr_for(schedule)
     opt = torch.optim.AdamW(
         model.parameters(), lr=lr, betas=cfg.adam_betas, eps=cfg.adam_eps,
         weight_decay=cfg.weight_decay,
@@ -59,7 +60,7 @@ def train_arm(cfg, task, hop, schedule, seed):
             ))
             model.train()
             print(
-                f"    [{schedule:>10} hop{hop} s{seed}] step {step:>5}  loss {loss.item():7.3f}  "
+                f"    [{tag:>12} hop{hop} s{seed}] step {step:>5}  loss {loss.item():7.3f}  "
                 f"h1_acc {e1['acc']:.3f}  h2_acc {e2['acc']:.3f}"
             )
 
@@ -68,7 +69,7 @@ def train_arm(cfg, task, hop, schedule, seed):
     f2 = evaluate(model, task, cfg, cfg.final_eval_batches, hop=2, do_lens=True)
 
     result = dict(
-        hop=hop, schedule=schedule, seed=seed, lr=lr,
+        hop=hop, schedule=tag, tag=tag, seed=seed, lr=lr,
         curve=curve, final_hop1=f1, final_hop2=f2,
     )
     del model

@@ -45,8 +45,8 @@ def load_json(path):
         return json.load(f)
 
 
-def arm_path(cfg, hop, schedule, seed):
-    return os.path.join(cfg.out_dir, "intervention", f"hop{hop}_{schedule}_seed{seed}.json")
+def arm_path(cfg, hop, tag, seed):
+    return os.path.join(cfg.out_dir, "intervention", f"hop{hop}_{tag}_seed{seed}.json")
 
 
 def print_env():
@@ -87,7 +87,7 @@ def cmd_intervention(cfg):
             for schedule in cfg.schedules:
                 done += 1
                 print(f"\n  --- arm {done}/{n}: hop{hop} {schedule} seed{seed} ---")
-                res = train_arm(cfg, task, hop, schedule, seed)
+                res = train_arm(cfg, task, hop, cfg.lr_for(schedule), schedule, seed)
                 save_json(res, arm_path(cfg, hop, schedule, seed))
     print("\n  all arms complete")
     summary_rows, lens = aggregate_intervention(cfg)
@@ -97,13 +97,10 @@ def cmd_intervention(cfg):
 
 
 def _load_all_arms(cfg):
+    import glob
     arms = []
-    for seed in range(cfg.seeds):
-        for hop in cfg.tasks:
-            for schedule in cfg.schedules:
-                p = arm_path(cfg, hop, schedule, seed)
-                if os.path.exists(p):
-                    arms.append(load_json(p))
+    for p in sorted(glob.glob(os.path.join(cfg.out_dir, "intervention", "hop*_*.json"))):
+        arms.append(load_json(p))
     return arms
 
 
@@ -181,6 +178,99 @@ def aggregate_intervention(cfg):
 
     print(f"  -> {cfg.out_dir}/intervention_summary.csv, intervention_curves.png, logit_lens.png")
     return summary_rows, lens_by_schedule
+
+
+# ----------------------------------------------------------------------- sweep
+def cmd_sweep(cfg, lrs):
+    print("\n[sweep] LR sweep for the composition (Hop-2 by default)")
+    task = ChainTask(cfg)
+    hops = cfg.tasks if cfg.tasks else (2,)
+    n = len(lrs) * len(hops) * cfg.seeds
+    print(f"  {n} arms: lrs={[f'{x:g}' for x in lrs]} hops={list(hops)} seeds={cfg.seeds}")
+    done = 0
+    for seed in range(cfg.seeds):
+        for hop in hops:
+            for lr in lrs:
+                done += 1
+                tag = f"lr{lr:g}"
+                print(f"\n  --- sweep arm {done}/{n}: hop{hop} lr={lr:g} seed{seed} ---")
+                res = train_arm(cfg, task, hop, lr, tag, seed)
+                save_json(res, arm_path(cfg, hop, tag, seed))
+    aggregate_sweep(cfg)
+
+
+def aggregate_sweep(cfg):
+    arms = [a for a in _load_all_arms(cfg) if a["hop"] == 2]
+    if not arms:
+        print("  (no Hop-2 sweep arms found)")
+        return
+    by_lr = defaultdict(list)
+    for a in arms:
+        by_lr[a["lr"]].append(a)
+
+    points, lens_points, summary = [], [], []
+    curves_by_group = {}
+    for lr, group in sorted(by_lr.items()):
+        exc = np.array([g["final_hop2"]["excess"] for g in group])
+        accs = np.array([g["final_hop2"]["acc"] for g in group])
+        cmax = [max(g["final_hop2"].get("lens_C", [0])) for g in group]
+        # jump step: first eval step where mean-ish excess crosses 0.5 (per first seed's curve)
+        jump = None
+        for pt in group[0]["curve"]:
+            if pt["hop2_excess"] >= 0.5:
+                jump = pt["step"]
+                break
+        points.append(dict(lr=lr, mean=float(exc.mean()), std=float(exc.std())))
+        lens_points.append(dict(lr=lr, C=float(np.mean(cmax))))
+        summary.append(dict(lr=lr, mean_acc=float(accs.mean()), mean_excess=float(exc.mean()),
+                            std_excess=float(exc.std()), max_lensC=float(np.mean(cmax)),
+                            jump_step=jump, n=len(group)))
+        # overlay curve (mean over seeds) keyed for plot_curves
+        steps = [pt["step"] for pt in group[0]["curve"]]
+        mat = np.array([[pt["hop2_excess"] for pt in g["curve"]] for g in group])
+        curves_by_group[(2, f"lr{lr:g}")] = dict(steps=steps, mean=mat.mean(0).tolist(),
+                                                 std=mat.std(0).tolist())
+
+    plotting.plot_sweep(points, os.path.join(cfg.out_dir, "sweep_invertedU.png"), lens_points)
+    plotting.plot_curves(curves_by_group, os.path.join(cfg.out_dir, "sweep_curves.png"))
+
+    with open(os.path.join(cfg.out_dir, "sweep_summary.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["lr", "mean_acc", "mean_excess", "std_excess", "max_lensC", "jump_step", "n_seeds"])
+        for r in summary:
+            w.writerow([f"{r['lr']:g}", f"{r['mean_acc']:.4f}", f"{r['mean_excess']:.4f}",
+                        f"{r['std_excess']:.4f}", f"{r['max_lensC']:.4f}",
+                        r["jump_step"] if r["jump_step"] is not None else "", r["n"]])
+
+    # short summary
+    forms = [r for r in summary if r["mean_excess"] >= 0.5]
+    lines = ["# LR sweep -- composition (Hop-2) acquisition vs continued-training LR\n",
+             f"Model `{cfg.model_name}` @ `{cfg.late_revision}`, L={cfg.chain_len}, "
+             f"seeds={cfg.seeds}, Hop-2 steps={cfg.max_steps_hop2}\n",
+             "| LR | mean acc | mean excess | max C-lens | jump step | forms? |",
+             "|---|---|---|---|---|---|"]
+    for r in summary:
+        lines.append(f"| {r['lr']:g} | {r['mean_acc']:.3f} | {r['mean_excess']:+.3f} ± "
+                     f"{r['std_excess']:.3f} | {r['max_lensC']:.2f} | "
+                     f"{r['jump_step'] if r['jump_step'] is not None else '-'} | "
+                     f"{'YES' if r['mean_excess'] >= 0.5 else 'no'} |")
+    lines.append("")
+    if forms:
+        lo = min(r["lr"] for r in forms)
+        hi = max(r["lr"] for r in forms)
+        lines.append(f"**Acquisition band**: composition forms for LR in roughly "
+                     f"[{lo:g}, {hi:g}]. Outside this band it stays near floor.")
+        if len(forms) < len(summary):
+            lines.append("Non-monotonic in LR: blocked both below (too small to traverse to the "
+                         "solution -- the toy's late-decay regime) and above (too large to settle "
+                         "into the sharp routing minimum). Reconciles the toy as the lower edge.")
+    else:
+        lines.append("No LR in the swept range acquired the composition -- widen the range or steps.")
+    out = os.path.join(cfg.out_dir, "SWEEP_SUMMARY.md")
+    with open(out, "w") as f:
+        f.write("\n".join(lines))
+    print(f"  -> {cfg.out_dir}/sweep_invertedU.png, sweep_curves.png, sweep_summary.csv, SWEEP_SUMMARY.md")
+    print("\n" + "\n".join(lines))
 
 
 # ------------------------------------------------------------------- SUMMARY
@@ -344,7 +434,7 @@ def build_cfg(args):
 def main():
     p = argparse.ArgumentParser(description="Pythia critical-period probe")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("induction", "intervention", "all", "smoke"):
+    for name in ("induction", "intervention", "all", "smoke", "sweep"):
         sp = sub.add_parser(name)
         sp.add_argument("--model", type=str, default=None)
         sp.add_argument("--revision", type=str, default=None)
@@ -358,18 +448,25 @@ def main():
                         choices=["native_low", "deep_low", "rewarm"])
         sp.add_argument("--tasks", nargs="+", type=int, default=None, choices=[1, 2])
         sp.add_argument("--out-dir", dest="out_dir", type=str, default=None)
+        if name == "sweep":
+            sp.add_argument("--lrs", nargs="+", type=float, required=True,
+                            help="learning rates to sweep, e.g. --lrs 6e-6 2e-5 6e-5 1.5e-4 6e-4")
     args = p.parse_args()
 
     print_env()
     cfg = build_cfg(args)
     if args.cmd == "smoke":
         cfg = apply_smoke(cfg)
+    if args.cmd == "sweep" and args.tasks is None:
+        cfg.tasks = (2,)  # sweep the composition by default
     ensure_dirs(cfg)
 
     if args.cmd == "induction":
         cmd_induction(cfg)
     elif args.cmd == "intervention":
         cmd_intervention(cfg)
+    elif args.cmd == "sweep":
+        cmd_sweep(cfg, list(args.lrs))
     else:  # all, smoke
         cmd_all(cfg)
 

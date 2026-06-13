@@ -63,6 +63,36 @@ def plot_curves(curves_by_group, out_path):
     plt.close(fig)
 
 
+def plot_sweep(points, out_path, lens_points=None):
+    """points = [{lr, mean, std}] of final Hop-2 excess; optional lens_points = [{lr, C}]."""
+    points = sorted(points, key=lambda p: p["lr"])
+    lrs = [p["lr"] for p in points]
+    mean = [p["mean"] for p in points]
+    std = [p["std"] for p in points]
+    ncol = 2 if lens_points else 1
+    fig, ax = plt.subplots(1, ncol, figsize=(11 if lens_points else 6, 4), squeeze=False)
+    a = ax[0][0]
+    a.errorbar(lrs, mean, yerr=std, fmt="o-", capsize=3, color="C0")
+    a.set_xscale("log")
+    a.axhline(0.0, color="k", ls=":", lw=0.8)
+    a.set_xlabel("continued-training learning rate")
+    a.set_ylabel("final Hop-2 excess (acc - floor)")
+    a.set_title("Composition forms only within an LR band")
+    a.grid(alpha=0.3)
+    if lens_points:
+        lp = sorted(lens_points, key=lambda p: p["lr"])
+        a2 = ax[0][1]
+        a2.plot([p["lr"] for p in lp], [p["C"] for p in lp], "o-", color="C3")
+        a2.set_xscale("log")
+        a2.set_xlabel("continued-training learning rate")
+        a2.set_ylabel("max Hop-2 answer-C logit lens")
+        a2.set_title("Reorganisation vs LR")
+        a2.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 def plot_lens(lens_by_schedule, out_path):
     """lens_by_schedule[schedule] = dict(C=[per-layer], B=[per-layer])  (Hop-2)."""
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))

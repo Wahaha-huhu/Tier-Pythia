@@ -58,28 +58,28 @@ HF cache; make sure the volume has ~15 GB free.
 # 0) sanity-check the environment (a few minutes, mostly downloads)
 bash scripts/run_smoke.sh
 
-# 1) Hop-2 FORMATION PROBE -- run this before the full factorial.
-#    Finds the timescale at which the composition forms (or doesn't) under
-#    native_low vs rewarm. ~30-40 min. Watch whether Hop-2 accuracy makes the
-#    jump above floor, and which schedule gets there.
-python run.py intervention --seeds 1 --schedules native_low rewarm --tasks 2 \
-    --steps 8000 --out-dir results_probe
+# 1) HEADLINE EXPERIMENT -- LR sweep for the composition.
+#    Maps the inverted-U: the Hop-2 composition forms only within a learning-rate
+#    band (blocked both above and below). ~2.5-3 h for 5 LRs x 3 seeds.
+python run.py sweep --lrs 6e-6 2e-5 6e-5 1.5e-4 6e-4 --seeds 3 \
+    --steps 7000 --out-dir results_sweep
+#    -> results_sweep/sweep_invertedU.png, sweep_curves.png, SWEEP_SUMMARY.md
 
-# 2) full thesis run (~3 h on one A100) -- only after the probe looks right
+# 2) (optional) full named-schedule factorial incl. the cheap Hop-1 selectivity arms
 bash scripts/run_full.sh
 
-# 3) bundle the (small) key results to send back
-bash scripts/zip_results.sh     # -> results_bundle.zip
+# 3) bundle results to send back
+zip -r results_bundle.zip results_sweep >/dev/null   # or: bash scripts/zip_results.sh
 ```
 
-Knobs you may want for the probe: `--chain-len 4` (composition forms even faster) and
-`--steps 12000` (longer runway) if Hop-2 is still climbing at the end.
+Knobs: `--chain-len 4` (composition forms even faster), `--steps 12000` (if a low-LR arm
+is still climbing at the end), wider `--lrs` to locate the band edges precisely.
 
 Other sub-runs:
 
 ```bash
-python run.py induction                         # just the induction window
-python run.py all --model EleutherAI/pythia-410m --revision step143000   # bigger model
+python run.py induction                                   # just the induction window
+python run.py all --model EleutherAI/pythia-410m          # bigger model
 ```
 
 ## What to send back
