@@ -33,7 +33,8 @@ class Config:
     lr_deep_low: float = 6e-6             # keep decaying below Pythia's floor (toward toy regime)
     lr_rewarm: float = 6e-4              # rewarm to peak. NB: fresh optimiser == rewarm+RESET,
     #                                       which the toy showed is equivalent to plain rewarm.
-    warmup_steps: int = 50                 # short ramp to avoid an LR-change loss spike
+    warmup_steps: int = 200                # smooth ramp; the 10x jump to rewarm peak spikes
+    #                                        the new-task loss without an adequate warmup
 
     # ---- Continued-training loop ----
     max_steps: int = 3000

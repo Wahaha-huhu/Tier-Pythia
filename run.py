@@ -90,7 +90,10 @@ def cmd_intervention(cfg):
                 res = train_arm(cfg, task, hop, schedule, seed)
                 save_json(res, arm_path(cfg, hop, schedule, seed))
     print("\n  all arms complete")
-    aggregate_intervention(cfg)
+    summary_rows, lens = aggregate_intervention(cfg)
+    ind_path = os.path.join(cfg.out_dir, "induction_window.json")
+    ind = load_json(ind_path) if os.path.exists(ind_path) else []
+    write_summary(cfg, ind, summary_rows, lens)
 
 
 def _load_all_arms(cfg):
@@ -108,7 +111,7 @@ def aggregate_intervention(cfg):
     arms = _load_all_arms(cfg)
     if not arms:
         print("  (no arm results to aggregate)")
-        return
+        return [], {}
 
     # ---- summary table: per (hop, schedule), hop-matching final acc/excess over seeds
     by_group = defaultdict(list)
@@ -235,28 +238,41 @@ def write_summary(cfg, induction_rows, summary_rows, lens_by_schedule):
         h2_deep = _get(summary_rows, 2, "deep_low", "mean_excess")
 
         lines.append("## Headline reads (auto-detected)\n")
+        HI, LO = 0.5, 0.2  # excess bars: "acquired" vs "near floor"
         if h1_low is not None and h2_low is not None:
-            if h1_low > 0.5 and h2_low < 0.2:
-                lines.append(f"- **SELECTIVITY present**: at the decayed LR the fresh lookup "
-                             f"learns (excess {h1_low:+.2f}) while the composition stays near "
+            gap = h1_low - h2_low
+            if h1_low >= HI and h2_low <= LO:
+                lines.append(f"- **SELECTIVITY (clean)**: at the decayed LR the fresh lookup is "
+                             f"acquired (excess {h1_low:+.2f}) while the composition stays near "
                              f"floor (excess {h2_low:+.2f}). Rules out generic plasticity loss.")
-            elif h1_low <= 0.5:
-                lines.append(f"- **No selectivity**: even the fresh lookup struggles at the "
-                             f"decayed LR (excess {h1_low:+.2f}) -> looks like generic plasticity "
-                             f"loss, not composition-specific.")
+            elif gap >= 0.3 and h1_low > h2_low:
+                lines.append(f"- **SELECTIVITY (partial/early)**: lookup is ahead of composition "
+                             f"at the decayed LR (excess {h1_low:+.2f} vs {h2_low:+.2f}); the gap "
+                             f"should widen with more steps. Confirm at the full step budget.")
+            elif h1_low <= LO:
+                lines.append(f"- **Neither acquired yet at the decayed LR** (lookup {h1_low:+.2f}, "
+                             f"composition {h2_low:+.2f}). If this persists at the full step budget "
+                             f"it points to generic plasticity loss; at low step counts it may "
+                             f"simply be undertrained.")
             else:
-                lines.append(f"- **No barrier at native floor**: the composition also learns at "
-                             f"the decayed LR (excess {h2_low:+.2f}). Check deep_low below; the "
-                             f"barrier may sit below Pythia's 10% LR floor.")
+                lines.append(f"- **No clear barrier at the native floor**: the composition is also "
+                             f"climbing at the decayed LR (excess {h2_low:+.2f}). Check deep_low; "
+                             f"the barrier may sit below Pythia's 10% LR floor.")
         if h2_low is not None and h2_rew is not None:
-            if h2_rew - h2_low > 0.3:
+            if h2_rew - h2_low >= 0.3:
                 lines.append(f"- **RECOVERABILITY present**: rewarm lifts Hop-2 excess from "
                              f"{h2_low:+.2f} to {h2_rew:+.2f}. Matches the toy's reopenable barrier.")
+            elif h2_rew <= LO and h2_low <= LO:
+                lines.append(f"- **Composition not acquired under either schedule yet** "
+                             f"(rewarm {h2_rew:+.2f}, native {h2_low:+.2f}). Needs more steps, or "
+                             f"the rewarm transient is still recovering -- check the loss curve.")
             else:
                 lines.append(f"- **Rewarm did not clearly rescue** (Hop-2 {h2_low:+.2f} -> {h2_rew:+.2f}).")
         if h2_deep is not None:
             lines.append(f"- deep_low Hop-2 excess = {h2_deep:+.2f} "
                          f"(expected lowest if the barrier deepens with decay).")
+        lines.append("\n*Reads use fixed excess bars (acquired >= +0.5, near-floor <= +0.2) and are "
+                     "only reliable at the full step budget; short runs under-state acquisition.*")
         lines.append("")
 
     # --- lens
@@ -278,11 +294,8 @@ def write_summary(cfg, induction_rows, summary_rows, lens_by_schedule):
 
 
 def cmd_all(cfg):
-    ind = cmd_induction(cfg)
-    cmd_intervention(cfg)
-    agg = aggregate_intervention(cfg)
-    summary_rows, lens = agg if agg else ([], {})
-    write_summary(cfg, ind, summary_rows, lens)
+    cmd_induction(cfg)
+    cmd_intervention(cfg)  # self-aggregates and writes SUMMARY.md (using induction on disk)
 
 
 # ----------------------------------------------------------------------- smoke
