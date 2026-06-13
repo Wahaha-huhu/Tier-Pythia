@@ -33,8 +33,9 @@ def train_arm(cfg, task, hop, schedule, seed):
     sch = _make_warmup_constant(opt, cfg.warmup_steps)
     rng = np.random.default_rng(seed)
 
+    total_steps = cfg.steps_for(hop)
     curve = []
-    for step in range(cfg.max_steps):
+    for step in range(total_steps):
         b = task.batch(cfg.batch_size, hop, rng)
         input_ids = b["input_ids"].to(cfg.device)
         labels = b["labels"].to(cfg.device)
@@ -48,7 +49,7 @@ def train_arm(cfg, task, hop, schedule, seed):
         opt.step()
         sch.step()
 
-        if (step % cfg.eval_every == 0) or (step == cfg.max_steps - 1):
+        if (step % cfg.eval_every == 0) or (step == total_steps - 1):
             e1 = evaluate(model, task, cfg, cfg.train_eval_batches, hop=1)
             e2 = evaluate(model, task, cfg, cfg.train_eval_batches, hop=2)
             curve.append(dict(

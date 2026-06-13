@@ -195,7 +195,8 @@ def write_summary(cfg, induction_rows, summary_rows, lens_by_schedule):
     lines = []
     lines.append("# Pythia critical-period probe -- auto-generated summary\n")
     lines.append(f"Model: `{cfg.model_name}` @ `{cfg.late_revision}`  |  "
-                 f"seeds={cfg.seeds}, max_steps={cfg.max_steps}, "
+                 f"seeds={cfg.seeds}, L={cfg.chain_len}, "
+                 f"steps(hop1/hop2)={cfg.max_steps_hop1}/{cfg.max_steps_hop2}, "
                  f"LRs: native_low={cfg.lr_native_low:g}, deep_low={cfg.lr_deep_low:g}, "
                  f"rewarm={cfg.lr_rewarm:g}\n")
 
@@ -302,7 +303,8 @@ def cmd_all(cfg):
 def apply_smoke(cfg):
     cfg.induction_steps = (0, 1, 512, 143000)
     cfg.induction_batch = 4
-    cfg.max_steps = 60
+    cfg.max_steps_hop1 = 60
+    cfg.max_steps_hop2 = 60
     cfg.eval_every = 20
     cfg.batch_size = 64
     cfg.train_eval_batches = 2
@@ -323,7 +325,11 @@ def build_cfg(args):
     if getattr(args, "revision", None):
         cfg.late_revision = args.revision
     if getattr(args, "steps", None):
-        cfg.max_steps = args.steps
+        cfg.max_steps_hop2 = args.steps
+    if getattr(args, "steps_hop1", None):
+        cfg.max_steps_hop1 = args.steps_hop1
+    if getattr(args, "chain_len", None):
+        cfg.chain_len = args.chain_len
     if getattr(args, "seeds", None):
         cfg.seeds = args.seeds
     if getattr(args, "schedules", None):
@@ -342,7 +348,11 @@ def main():
         sp = sub.add_parser(name)
         sp.add_argument("--model", type=str, default=None)
         sp.add_argument("--revision", type=str, default=None)
-        sp.add_argument("--steps", type=int, default=None)
+        sp.add_argument("--steps", type=int, default=None,
+                        help="Hop-2 step budget (the binding constraint)")
+        sp.add_argument("--steps-hop1", dest="steps_hop1", type=int, default=None)
+        sp.add_argument("--chain-len", dest="chain_len", type=int, default=None,
+                        help="chain length L (smaller = composition forms faster)")
         sp.add_argument("--seeds", type=int, default=None)
         sp.add_argument("--schedules", nargs="+", default=None,
                         choices=["native_low", "deep_low", "rewarm"])

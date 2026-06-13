@@ -25,7 +25,10 @@ class Config:
     pool_hi: int = 50000                   # stay well within real-token range (<50254)
     # markers: QUERY, HOP_1, HOP_2, SEP  (rare but REAL trained token rows, <50254)
     marker_ids: Tuple[int, int, int, int] = (50250, 50251, 50252, 50253)
-    chain_len: int = 8                     # L; chain has L+1 distinct tokens, L edges
+    chain_len: int = 5                     # L; chain has L+1 distinct tokens, L edges.
+    #                                        Reduced from 8: shorter in-context search lets the
+    #                                        Hop-2 composition form in far fewer steps (the
+    #                                        phenomenon is not L-specific). Floor = 1/(L+1).
     pool_seed: int = 0                     # fixes the content pool identically across all runs
 
     # ---- Learning-rate schedules (the core manipulation) ----
@@ -37,7 +40,10 @@ class Config:
     #                                        the new-task loss without an adequate warmup
 
     # ---- Continued-training loop ----
-    max_steps: int = 3000
+    # Per-task budgets: Hop-1 saturates fast (~500 steps), Hop-2 needs a long runway to
+    # pass through the pre-jump phase and (if it does) make the accuracy jump.
+    max_steps_hop1: int = 1500
+    max_steps_hop2: int = 8000
     batch_size: int = 256
     grad_clip: float = 1.0
     weight_decay: float = 0.01             # matches Pythia
@@ -78,3 +84,6 @@ class Config:
             "deep_low": self.lr_deep_low,
             "rewarm": self.lr_rewarm,
         }[schedule]
+
+    def steps_for(self, hop: int) -> int:
+        return self.max_steps_hop1 if hop == 1 else self.max_steps_hop2

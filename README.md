@@ -58,19 +58,28 @@ HF cache; make sure the volume has ~15 GB free.
 # 0) sanity-check the environment (a few minutes, mostly downloads)
 bash scripts/run_smoke.sh
 
-# 1) full thesis run (~3–4 h on one A100)
+# 1) Hop-2 FORMATION PROBE -- run this before the full factorial.
+#    Finds the timescale at which the composition forms (or doesn't) under
+#    native_low vs rewarm. ~30-40 min. Watch whether Hop-2 accuracy makes the
+#    jump above floor, and which schedule gets there.
+python run.py intervention --seeds 1 --schedules native_low rewarm --tasks 2 \
+    --steps 8000 --out-dir results_probe
+
+# 2) full thesis run (~3 h on one A100) -- only after the probe looks right
 bash scripts/run_full.sh
 
-# 2) bundle the (small) key results to send back
+# 3) bundle the (small) key results to send back
 bash scripts/zip_results.sh     # -> results_bundle.zip
 ```
 
-Sub-runs / overrides if you want them:
+Knobs you may want for the probe: `--chain-len 4` (composition forms even faster) and
+`--steps 12000` (longer runway) if Hop-2 is still climbing at the end.
+
+Other sub-runs:
 
 ```bash
-python run.py induction                         # just the window
-python run.py intervention --seeds 3 --schedules native_low rewarm --steps 3000
-python run.py all --model EleutherAI/pythia-410m --revision step143000   # try a bigger model
+python run.py induction                         # just the induction window
+python run.py all --model EleutherAI/pythia-410m --revision step143000   # bigger model
 ```
 
 ## What to send back
