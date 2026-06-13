@@ -19,6 +19,32 @@ from .model_utils import load_model
 
 
 @torch.no_grad()
+def icl_gap_only(model, cfg):
+    """Loss-based in-context-copying signal on a repeated-random-token sequence.
+    Uses logits only (no output_attentions), so it is SDPA-safe and can be called
+    cheaply during continued training without disturbing it. This is the same primary
+    signal as the induction window: it tracks whether GENERAL induction (prefix-match
+    -and-copy) is present, independent of the synthetic chain format."""
+    T, B = cfg.induction_T, cfg.induction_batch
+    rng = np.random.default_rng(cfg.induction_seed)
+    base = rng.integers(cfg.pool_lo, cfg.pool_hi, size=(B, T))
+    seq = np.concatenate([base, base], axis=1)
+    input_ids = torch.tensor(seq, dtype=torch.long, device=cfg.device)
+    was_training = model.training
+    model.eval()
+    out = model(input_ids=input_ids)
+    model.train() if was_training else None
+    logits = out.logits
+    V = logits.shape[-1]
+    sl = logits[:, :-1, :]
+    lab = input_ids[:, 1:]
+    lt = F.cross_entropy(sl.reshape(-1, V), lab.reshape(-1), reduction="none").reshape(B, 2 * T - 1)
+    first = lt[:, 0:T - 1].mean().item()
+    second = lt[:, T:2 * T - 1].mean().item()
+    return first - second
+
+
+@torch.no_grad()
 def induction_metrics_for_model(model, cfg):
     T, B = cfg.induction_T, cfg.induction_batch
     rng = np.random.default_rng(cfg.induction_seed)

@@ -93,6 +93,29 @@ def plot_sweep(points, out_path, lens_points=None):
     plt.close(fig)
 
 
+def plot_track(steps, icl_gap, hop2_acc, out_path, title="continued training"):
+    """Overlay: general induction (ICL gap) and composition accuracy over training."""
+    steps = np.array(steps)
+    fig, ax1 = plt.subplots(figsize=(8, 4.5))
+    c1 = "C3"
+    ax1.plot(steps, icl_gap, "-o", ms=3, color=c1, label="ICL gap (general induction)")
+    ax1.set_xlabel("continued-training step")
+    ax1.set_ylabel("ICL gap (nats)", color=c1)
+    ax1.tick_params(axis="y", labelcolor=c1)
+    ax1.grid(alpha=0.3)
+    ax2 = ax1.twinx()
+    c2 = "C0"
+    ax2.plot(steps, hop2_acc, "-s", ms=3, color=c2, label="Hop-2 accuracy (composition)")
+    ax2.axhline(0.167, color="gray", ls=":", lw=0.8)
+    ax2.set_ylabel("Hop-2 accuracy", color=c2)
+    ax2.tick_params(axis="y", labelcolor=c2)
+    ax2.set_ylim(-0.02, 1.02)
+    ax1.set_title(f"Does the primitive form before the composition? ({title})")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 def plot_sharpness(curves_by_lr, out_path):
     """curves_by_lr[lr] = dict(steps, lambda_max, eta_lambda, h2_acc)."""
     fig, ax = plt.subplots(1, 3, figsize=(16, 4))

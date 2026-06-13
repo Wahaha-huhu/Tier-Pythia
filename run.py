@@ -252,12 +252,13 @@ def aggregate_sharpness(cfg):
 
 
 # ----------------------------------------------------------------------- sweep
-def cmd_sweep(cfg, lrs):
+def cmd_sweep(cfg, lrs, track_induction=False):
     print("\n[sweep] LR sweep for the composition (Hop-2 by default)")
     task = ChainTask(cfg)
     hops = cfg.tasks if cfg.tasks else (2,)
     n = len(lrs) * len(hops) * cfg.seeds
-    print(f"  {n} arms: lrs={[f'{x:g}' for x in lrs]} hops={list(hops)} seeds={cfg.seeds}")
+    print(f"  {n} arms: lrs={[f'{x:g}' for x in lrs]} hops={list(hops)} seeds={cfg.seeds}"
+          f"{' (+induction tracking)' if track_induction else ''}")
     done = 0
     for seed in range(cfg.seeds):
         for hop in hops:
@@ -265,7 +266,7 @@ def cmd_sweep(cfg, lrs):
                 done += 1
                 tag = f"lr{lr:g}"
                 print(f"\n  --- sweep arm {done}/{n}: hop{hop} lr={lr:g} seed{seed} ---")
-                res = train_arm(cfg, task, hop, lr, tag, seed)
+                res = train_arm(cfg, task, hop, lr, tag, seed, measure_induction=track_induction)
                 save_json(res, arm_path(cfg, hop, tag, seed))
     aggregate_sweep(cfg)
 
@@ -304,6 +305,16 @@ def aggregate_sweep(cfg):
 
     plotting.plot_sweep(points, os.path.join(cfg.out_dir, "sweep_invertedU.png"), lens_points)
     plotting.plot_curves(curves_by_group, os.path.join(cfg.out_dir, "sweep_curves.png"))
+
+    # if induction was tracked, emit an overlay (general induction vs composition) per arm
+    for a in arms:
+        c = a["curve"]
+        if c and ("icl_gap" in c[0]):
+            steps = [pt["step"] for pt in c]
+            icl = [pt.get("icl_gap", float("nan")) for pt in c]
+            acc = [pt["hop2_acc"] for pt in c]
+            fn = os.path.join(cfg.out_dir, f"track_{a['tag']}_seed{a['seed']}.png")
+            plotting.plot_track(steps, icl, acc, fn, title=f"{cfg.late_revision}, lr={a['lr']:g}")
 
     with open(os.path.join(cfg.out_dir, "sweep_summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
@@ -522,6 +533,9 @@ def main():
         if name in ("sweep", "sharpness"):
             sp.add_argument("--lrs", nargs="+", type=float, required=True,
                             help="learning rates, e.g. --lrs 6e-6 2e-5 6e-5 1.5e-4 6e-4")
+        if name == "sweep":
+            sp.add_argument("--track-induction", dest="track_induction", action="store_true",
+                            help="also track the ICL gap (general induction) over training")
     args = p.parse_args()
 
     print_env()
@@ -537,7 +551,7 @@ def main():
     elif args.cmd == "intervention":
         cmd_intervention(cfg)
     elif args.cmd == "sweep":
-        cmd_sweep(cfg, list(args.lrs))
+        cmd_sweep(cfg, list(args.lrs), track_induction=getattr(args, "track_induction", False))
     elif args.cmd == "sharpness":
         cmd_sharpness(cfg, list(args.lrs))
     else:  # all, smoke

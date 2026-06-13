@@ -13,6 +13,7 @@ import torch
 from .model_utils import load_model
 from .eval import evaluate
 from .sharpness import top_hessian_eigenvalue
+from .induction import icl_gap_only
 
 
 def _make_warmup_constant(optimizer, warmup):
@@ -21,10 +22,10 @@ def _make_warmup_constant(optimizer, warmup):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, fn)
 
 
-def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False):
-    """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping
-    (a schedule name like 'rewarm', or an LR label like 'lr6e-05').
-    If measure_sharpness, also track the top Hessian eigenvalue (finite-difference HVP)."""
+def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False, measure_induction=False):
+    """One arm = (hop, lr, seed). `tag` is a label used for filenames/grouping.
+    measure_sharpness -> track top Hessian eigenvalue (finite-difference HVP).
+    measure_induction -> track the loss-based ICL gap (general induction) over training."""
     torch.manual_seed(seed)
     model = load_model(cfg, dtype=torch.float32)  # sdpa, same as the sweep; FD-HVP needs no eager
     model.train()
@@ -73,9 +74,12 @@ def train_arm(cfg, task, hop, lr, tag, seed, measure_sharpness=False):
                                              eps_rel=cfg.sharpness_eps_rel)
                 point["lambda_max"] = lam
                 point["eta_lambda"] = lr * lam
+            if measure_induction:
+                point["icl_gap"] = icl_gap_only(model, cfg)
             curve.append(point)
             model.train()
             extra = f"  lam {point['lambda_max']:.1f}  eta*lam {point['eta_lambda']:.2f}" if measure_sharpness else ""
+            extra += f"  icl_gap {point['icl_gap']:.2f}" if measure_induction else ""
             print(
                 f"    [{tag:>12} hop{hop} s{seed}] step {step:>5}  loss {loss.item():7.3f}  "
                 f"h1_acc {e1['acc']:.3f}  h2_acc {e2['acc']:.3f}{extra}"
