@@ -32,6 +32,10 @@ class Config:
     n_distractors: int = 0                  # extra off-chain [key,val] edges mixed into context
     #                                        (0 = original task; >0 raises difficulty / capacity
     #                                        pressure; also an axis of the generalization battery)
+    randomize_tokens: bool = False          # if True, draw each example's chain tokens fresh from
+    #                                        the FULL vocab range instead of the fixed 200-pool, so
+    #                                        the model cannot memorise token identities and must
+    #                                        learn a token-agnostic lookup (i.e. use induction).
     pool_seed: int = 0                     # fixes the content pool identically across all runs
 
     # ---- Learning-rate schedules (the core manipulation) ----

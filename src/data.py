@@ -36,11 +36,16 @@ class ChainTask:
         # used by the generalization battery to test token-identity invariance.
         rest = candidates[cfg.content_pool_size:]
         self.held_out_pool = rest[: cfg.content_pool_size].copy()
+        # FULL marker-free vocab range, for token-randomized training (no fixed vocabulary).
+        self.full_pool = candidates.copy()
+        self.randomize_tokens = getattr(cfg, "randomize_tokens", False)
         # sequence length for the default config (constant when L and n_distractors are fixed)
         self.seq_len = 3 * (self.L + self.n_distractors) + 4
 
     def _one_example(self, rng, hop, pool=None, L=None, n_distractors=None):
-        pool = self.pool if pool is None else pool
+        # pool resolution: explicit override wins; else full range if randomizing, else fixed pool
+        if pool is None:
+            pool = self.full_pool if self.randomize_tokens else self.pool
         L = self.L if L is None else L
         n_distractors = self.n_distractors if n_distractors is None else n_distractors
 

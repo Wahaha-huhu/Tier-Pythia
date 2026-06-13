@@ -620,10 +620,25 @@ def cmd_generalize(cfg, lr, eval_batches=None):
     Ltr, ndtr = cfg.chain_len, task.n_distractors
 
     print(f"\n[generalize] acquiring Hop-2 at {cfg.late_revision} "
-          f"(lr={lr:g}, train L={Ltr}, train distractors={ndtr})")
-    res = train_arm(cfg, task, 2, lr, "gen", 0, return_model=True)
+          f"(lr={lr:g}, train L={Ltr}, train distractors={ndtr}, "
+          f"randomize_tokens={task.randomize_tokens})")
+    res = train_arm(cfg, task, 2, lr, "gen", 0, measure_induction=True, return_model=True)
     model = res["model"]
     in_acc = res["final_hop2"]["acc"]
+    # induction trajectory during acquisition: preserved (token-general) vs cannibalised (token-bound)?
+    c = res["curve"]
+    if c and ("icl_gap" in c[0]):
+        steps = [p["step"] for p in c]
+        plotting.plot_track(steps, [p.get("icl_gap", float("nan")) for p in c],
+                            [p.get("max_head_induction", float("nan")) for p in c],
+                            [p["hop2_acc"] for p in c],
+                            os.path.join(out, "acquire_track.png"),
+                            title=f"{cfg.late_revision}, randomize={task.randomize_tokens}")
+        ind0 = c[0].get("max_head_induction", float("nan"))
+        indT = c[-1].get("max_head_induction", float("nan"))
+        iclT = c[-1].get("icl_gap", float("nan"))
+        print(f"  induction: max-head {ind0:.2f} -> {indT:.2f}, final ICL gap {iclT:+.2f} "
+              f"({'PRESERVED' if iclT > 1.0 else 'cannibalised'})")
     print(f"  acquired: in-distribution Hop-2 acc = {in_acc:.3f}\n  --- OOD battery ---")
 
     # each entry: (name, hop, pool, L, n_distractors) -- one axis shifted vs the training baseline
@@ -650,15 +665,18 @@ def cmd_generalize(cfg, lr, eval_batches=None):
         print(f"  {name:>26}: acc {r['acc']:.3f}  floor {r['floor']:.3f}  excess {r['excess']:+.3f}")
 
     save_json(dict(revision=cfg.late_revision, lr=lr, train_L=Ltr, train_distractors=ndtr,
+                   randomize_tokens=task.randomize_tokens,
                    in_dist_acc=in_acc, rows=rows), os.path.join(out, "generalize.json"))
     plotting.plot_generalize(rows, os.path.join(out, "generalize.png"),
                              title=f"{cfg.late_revision} systematic generalization "
-                                   f"(train L={Ltr}, dist={ndtr})", in_dist_acc=in_acc)
+                                   f"(train L={Ltr}, dist={ndtr}, rand={task.randomize_tokens})",
+                             in_dist_acc=in_acc)
 
     lines = [f"# Systematic generalization at {cfg.late_revision}", "",
-             f"Trained Hop-2 at lr={lr:g}, L={Ltr}, distractors={ndtr}; in-distribution "
-             f"acc {in_acc:.3f}. Each row shifts one axis vs that baseline. Near in-dist acc "
-             f"=> the algorithm transfers; near floor => a distribution-specific heuristic.", "",
+             f"Trained Hop-2 at lr={lr:g}, L={Ltr}, distractors={ndtr}, "
+             f"randomize_tokens={task.randomize_tokens}; in-distribution acc {in_acc:.3f}. "
+             f"Each row shifts one axis vs that baseline. Near in-dist acc => the algorithm "
+             f"transfers; near floor => a distribution-specific heuristic.", "",
              "| variant | hop | acc | floor | excess |", "|---|---|---|---|---|"]
     for r in rows:
         lines.append(f"| {r['name']} | {r['hop']} | {r['acc']:.3f} | {r['floor']:.3f} | {r['excess']:+.3f} |")
@@ -713,6 +731,8 @@ def build_cfg(args):
         cfg.tasks = tuple(args.tasks)
     if getattr(args, "train_distractors", None) is not None:
         cfg.n_distractors = args.train_distractors
+    if getattr(args, "randomize_tokens", False):
+        cfg.randomize_tokens = True
     if getattr(args, "out_dir", None):
         cfg.out_dir = args.out_dir
     return cfg
@@ -754,6 +774,10 @@ def main():
                             help="distractor edges during TRAINING (capacity-stress dial)")
             sp.add_argument("--eval-batches", dest="eval_batches", type=int, default=None,
                             help="eval batches per variant (default config.final_eval_batches)")
+        if name in ("generalize", "sweep"):
+            sp.add_argument("--randomize-tokens", dest="randomize_tokens", action="store_true",
+                            help="draw chain tokens fresh from the full vocab each example "
+                                 "(forces a token-agnostic solution; tests induction preservation)")
         if name == "ablate":
             sp.add_argument("--ablate-topk", dest="ablate_topk", type=int, default=3,
                             help="number of top induction heads to knock out")
